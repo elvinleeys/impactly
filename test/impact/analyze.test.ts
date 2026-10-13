@@ -102,6 +102,23 @@ describe('analyzeImpact (integration)', () => {
     expect(result.data?.stats.skippedFiles).toBe(5);
   });
 
+  it('isolates a file that crashes the parser instead of failing the whole analysis', async () => {
+    const depth = 50_000; // ~100KB, below maxFileBytes, deep enough to overflow a recursive parser
+    const nested = `export const x = import(${'('.repeat(depth)}y${')'.repeat(depth)});\n`;
+    const result = await analyze((r) => { r.write({ 'src/bomb.ts': nested, 'src/theme.ts': 'export const color = 9;\n' }); });
+    expect(result.status).toBe('truncated');
+    expect(result.reason).toContain('could not be parsed');
+    expect(result.reason).toContain('src/bomb.ts');
+    expect(summary(result.data?.candidates)).toContain('confirmed:imports-changed:src/Button.tsx');
+  });
+
+  it('stops reading source once the total byte budget is spent', async () => {
+    const result = await analyze((r) => { r.write({ 'src/theme.ts': 'export const color = 4;\n' }); }, { maxTotalBytes: 200 });
+    expect(result.status).toBe('truncated');
+    expect(result.reason).toContain('Read limit of 200 bytes');
+    expect(result.data?.stats.analyzedFiles).toBeLessThan(7);
+  });
+
   it('skips oversized source files and records it', async () => {
     const result = await analyze((r) => { r.write({ 'src/huge.ts': `export const x = "${'x'.repeat(2048)}";\n` }); }, { maxFileBytes: 1024 });
     expect(result.evidence.some((e) => e.detail.includes('over 1024 bytes'))).toBe(true);

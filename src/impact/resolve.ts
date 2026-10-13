@@ -81,7 +81,7 @@ export function createResolver(snapshot: RepoSnapshot, config: ResolverConfig = 
   if (Object.keys(mappedPaths).length > 0) options.paths = mappedPaths;
   const cache = ts.createModuleResolutionCache(ROOT, (name) => name, options);
   // Only the project's own aliases decide whether an unmatched specifier is a broken alias or a package.
-  const aliases = Object.entries(aliasPaths).map(([pattern, targets]) => ({ pattern: patternToRegExp(pattern), targets }));
+  const aliases = Object.entries(aliasPaths);
 
   return {
     resolve(fromFile, specifier) {
@@ -103,11 +103,13 @@ export function createResolver(snapshot: RepoSnapshot, config: ResolverConfig = 
         return { kind: 'unresolved', reason: `Relative import "${specifier}" did not match any file` };
       }
       if (specifier.startsWith('/')) return { kind: 'unresolved', reason: `Absolute import "${specifier}" is not supported` };
-      const matching = aliases.filter((alias) => alias.pattern.test(specifier));
+      const matching = aliases.flatMap(([pattern, targets]) => {
+        const wildcard = matchAlias(pattern, specifier);
+        return wildcard === null ? [] : [{ wildcard, targets }];
+      });
       if (matching.length > 0) {
         // Non-code assets through an alias (e.g. "@/styles.css"), which TypeScript itself does not resolve.
-        for (const { pattern, targets } of matching) {
-          const wildcard = pattern.exec(specifier)?.[1] ?? '';
+        for (const { wildcard, targets } of matching) {
           for (const target of targets) {
             const candidate = normalizeRepoPath(target.replace('*', wildcard));
             if (candidate !== null && snapshot.paths.has(candidate)) return { kind: 'internal', path: candidate };
@@ -133,18 +135,37 @@ function collectDirectories(paths: ReadonlySet<string>): Set<string> {
   return directories;
 }
 
-/** Makes alias targets repository-relative: tsconfig resolves them against baseUrl, else the config's directory. */
+/**
+ * Makes alias targets repository-relative: tsconfig resolves them against baseUrl, else the config's directory.
+ * Patterns and targets with more than one `*` are invalid in tsconfig and are dropped (TypeScript reports them
+ * as config diagnostics). The result has no prototype so keys such as "__proto__" stay ordinary entries.
+ */
 function rebasePaths(config: ResolverConfig): ts.MapLike<string[]> {
   const base = config.baseUrl ?? config.pathsBase ?? '.';
-  const result: ts.MapLike<string[]> = {};
+  const result = Object.create(null) as ts.MapLike<string[]>;
   for (const [key, targets] of Object.entries(config.paths ?? {})) {
-    result[key] = targets.map((target) => path.posix.join(base, target));
+    if (countStars(key) > 1) continue;
+    const valid = targets.filter((target) => countStars(target) <= 1).map((target) => path.posix.join(base, target));
+    if (valid.length > 0) result[key] = valid;
   }
   return result;
 }
 
-function patternToRegExp(pattern: string): RegExp {
-  // `*` becomes the (single) capture group, mirroring how tsconfig `paths` substitutes it.
-  const escaped = pattern.replace(/[.+?^${}()|[\]\\]/g, '\\$&').replace('*', '(.*)');
-  return new RegExp(`^${escaped}$`);
+function countStars(value: string): number {
+  return value.split('*').length - 1;
+}
+
+/**
+ * Matches a tsconfig `paths` pattern (at most one `*`) against a specifier the way TypeScript does:
+ * exact match, or prefix + anything + suffix. Returns the text matched by `*`, or null.
+ * Plain string comparison keeps matching linear for any pattern found in an untrusted config.
+ */
+export function matchAlias(pattern: string, specifier: string): string | null {
+  const star = pattern.indexOf('*');
+  if (star === -1) return pattern === specifier ? '' : null;
+  const prefix = pattern.slice(0, star);
+  const suffix = pattern.slice(star + 1);
+  if (specifier.length < prefix.length + suffix.length) return null;
+  if (!specifier.startsWith(prefix) || !specifier.endsWith(suffix)) return null;
+  return specifier.slice(prefix.length, specifier.length - suffix.length);
 }

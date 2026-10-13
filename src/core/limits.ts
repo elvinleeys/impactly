@@ -6,6 +6,7 @@ export const DEFAULT_LIMITS: Readonly<Limits> = Object.freeze({
   maxDepth: 5,
   maxGraphNodes: 20_000,
   maxFileBytes: 1024 * 1024,
+  maxTotalBytes: 256 * 1024 * 1024,
 });
 
 /** Merges user overrides into the defaults, rejecting anything that is not a positive integer. */

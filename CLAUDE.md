@@ -40,7 +40,8 @@ Impact semantics (keep these consistent when extending):
 - Seeds: changed files. Deleted files and the *old* path of a rename become `removed` seeds. Their paths are added to the resolver's path set so that importers still pointing at them resolve and are reported as `imports-deleted`.
 - Depth 1 importers are `confirmed`; depth ≥ 2 are `possible`. A dynamic `import()` whose static prefix directory contains a changed file is reported as `unknown`. Config files (`classify.ts` `isGlobalConfig`) and non-code files with no importers are `unknown` scope.
 - Unresolved imports are only surfaced (as evidence) for changed files. Bare specifiers that match no alias are treated as external packages.
-- Hitting `maxDepth`, `maxGraphNodes` or `maxFiles` sets the status to `truncated` with a reason. It must never be silently `ok`.
+- Hitting `maxDepth`, `maxGraphNodes`, `maxTotalBytes` or `maxFiles`, or a file the parser cannot handle, sets the status to `truncated` with a reason. It must never be silently `ok`.
+- `tsconfig` `paths` from the analysed repo are untrusted: aliases are matched with plain prefix/suffix comparison (`matchAlias`), never by building a RegExp from config text.
 
 Path aliases: `config.ts` reads the root `tsconfig.json`/`jsconfig.json` (following `extends` within the repo). `resolve.ts` never passes `baseUrl` to TypeScript, because it is deprecated in TS 6. Instead it rewrites `paths` targets to be repo-relative and emulates a project `baseUrl` with a fallback `*` mapping. Non-code assets imported through aliases or relative paths (`@/styles.css`) are resolved by a manual fallback, because TypeScript doesn't resolve them.
 

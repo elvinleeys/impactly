@@ -102,6 +102,8 @@ export interface Limits {
   maxGraphNodes: number;
   /** Source files larger than this are not parsed. */
   maxFileBytes: number;
+  /** Total bytes of source and config files read from git for the import graph. */
+  maxTotalBytes: number;
 }
 
 export interface Report {

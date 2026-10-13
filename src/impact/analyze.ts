@@ -48,17 +48,30 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
       });
       codeEntries = codeEntries.filter((entry) => (entry.size ?? 0) <= limits.maxFileBytes);
     }
-    if (codeEntries.length > limits.maxGraphNodes) {
-      // Keep changed files so their own imports are always analysed.
-      codeEntries.sort((a, b) => Number(changed.has(b.path)) - Number(changed.has(a.path)) || compareStrings(a.path, b.path));
-      truncate(`${codeEntries.length} source files found; only ${limits.maxGraphNodes} were parsed`);
-      codeEntries = codeEntries.slice(0, limits.maxGraphNodes);
-    }
+    // Config files are read first (they drive resolution), then changed files, so that their own imports
+    // are always analysed when a limit cuts the graph short.
     const configEntries = tree.filter(
       (entry) => (isConfigFile(entry.path) || path.posix.basename(entry.path) === 'package.json') && (entry.size ?? 0) <= limits.maxFileBytes,
     );
+    codeEntries.sort((a, b) => Number(changed.has(b.path)) - Number(changed.has(a.path)) || compareStrings(a.path, b.path));
+    const budget = { bytes: 0 };
+    const withinBudget = (entry: TreeEntry): boolean => {
+      const size = entry.size ?? 0;
+      if (budget.bytes + size > limits.maxTotalBytes) return false;
+      budget.bytes += size;
+      return true;
+    };
+    const readableConfigs = takeWhile(configEntries, withinBudget);
+    const foundCode = codeEntries.length;
+    codeEntries = takeWhile(codeEntries.slice(0, limits.maxGraphNodes), withinBudget);
+    if (readableConfigs.length < configEntries.length || codeEntries.length < Math.min(foundCode, limits.maxGraphNodes)) {
+      truncate(`Read limit of ${limits.maxTotalBytes} bytes reached; remaining files were not parsed`);
+    }
+    if (foundCode > limits.maxGraphNodes) {
+      truncate(`${foundCode} source files found; only ${limits.maxGraphNodes} were parsed`);
+    }
 
-    const toRead = [...codeEntries, ...configEntries];
+    const toRead = [...readableConfigs, ...codeEntries];
     const blobs = await readBlobs([...new Set(toRead.map((entry) => entry.oid))], input.cwd);
     const contents = new Map<string, string>();
     for (const entry of toRead) {
@@ -85,11 +98,19 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
     let opaqueDynamicImports = 0;
     let analyzedFiles = 0;
 
+    const unparsable: string[] = [];
     for (const entry of codeEntries) {
       const content = contents.get(entry.path);
       if (content === undefined) continue;
+      let parsed: ReturnType<typeof parseImports>;
+      try {
+        parsed = parseImports(entry.path, content);
+      } catch {
+        // e.g. pathologically nested code overflowing the parser's stack; isolate it to this file.
+        unparsable.push(entry.path);
+        continue;
+      }
       analyzedFiles++;
-      const parsed = parseImports(entry.path, content);
       for (const specifier of parsed.specifiers) {
         const resolution = resolver.resolve(entry.path, specifier.text);
         if (resolution.kind === 'internal') {
@@ -113,6 +134,9 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
           unknown.push({ path: entry.path, certainty: 'unknown', reason: 'dynamic-import', depth: 1, via: [entry.path, target] });
         }
       }
+    }
+    if (unparsable.length > 0) {
+      truncate(`${unparsable.length} source files could not be parsed and their imports are unknown (e.g. ${unparsable[0] ?? ''})`);
     }
     if (opaqueDynamicImports > 0) {
       evidence.push({
@@ -172,4 +196,13 @@ export function dynamicTargetDirectory(fromFile: string, staticPrefix: string | 
   const prefixDir = staticPrefix.endsWith('/') ? staticPrefix : path.posix.dirname(staticPrefix);
   const directory = normalizeRepoPath(path.posix.join(path.posix.dirname(fromFile), prefixDir));
   return directory;
+}
+
+function takeWhile<T>(items: readonly T[], predicate: (item: T) => boolean): T[] {
+  const taken: T[] = [];
+  for (const item of items) {
+    if (!predicate(item)) break;
+    taken.push(item);
+  }
+  return taken;
 }

@@ -5,7 +5,7 @@ import { isGlobalConfig, seedKind, seedsFromDiff } from '../../src/impact/classi
 import { isConfigFile, loadResolverConfig } from '../../src/impact/config.js';
 import { buildReverseIndex, computeImpact, sortCandidates, type ImportEdge, type Seed } from '../../src/impact/graph.js';
 import { isCodeFile, parseImports } from '../../src/impact/parseImports.js';
-import { createResolver, type RepoSnapshot } from '../../src/impact/resolve.js';
+import { createResolver, matchAlias, type RepoSnapshot } from '../../src/impact/resolve.js';
 
 function snapshot(files: Record<string, string>, extraPaths: string[] = []): RepoSnapshot {
   return { paths: new Set([...Object.keys(files), ...extraPaths]), read: (path) => files[path] };
@@ -107,6 +107,23 @@ describe('createResolver', () => {
     const resolver = createResolver(snapshot(files), { baseUrl: '.', paths: { 'util/*': ['lib/*'] } });
     expect(resolver.resolve('app/page.tsx', 'util/util')).toEqual({ kind: 'internal', path: 'lib/util.ts' });
     expect(resolver.resolve('app/page.tsx', 'src/a')).toEqual({ kind: 'internal', path: 'src/a.ts' });
+  });
+
+  it('ignores invalid multi-star aliases from an untrusted tsconfig instead of throwing', () => {
+    const resolver = createResolver(snapshot(files), {
+      paths: { 'a**b': ['src/*'], '@/*': ['src/*'], 'x/*': ['lib/**'] },
+      pathsBase: '.',
+    });
+    expect(resolver.resolve('app/page.tsx', 'a' + 'a'.repeat(40) + 'c')).toEqual({ kind: 'external' });
+    expect(resolver.resolve('app/page.tsx', '@/a')).toEqual({ kind: 'internal', path: 'src/a.ts' });
+    expect(resolver.resolve('app/page.tsx', 'x/util')).toEqual({ kind: 'external' });
+  });
+
+  it('treats a "__proto__" alias key as an ordinary alias', () => {
+    const paths = JSON.parse('{"__proto__": ["lib/util.ts"], "@/*": ["src/*"]}') as Record<string, string[]>;
+    const resolver = createResolver(snapshot(files), { paths, pathsBase: '.' });
+    expect(resolver.resolve('app/page.tsx', '@/a')).toEqual({ kind: 'internal', path: 'src/a.ts' });
+    expect(resolver.resolve('app/page.tsx', '__proto__')).toEqual({ kind: 'internal', path: 'lib/util.ts' });
   });
 
   it('resolves non-code assets through path aliases, honouring baseUrl', () => {
@@ -318,5 +335,31 @@ describe('dynamicTargetDirectory', () => {
     ['a.ts', '../../outside/'],
   ])('%s + %j -> null', (from, prefix) => {
     expect(dynamicTargetDirectory(from, prefix)).toBeNull();
+  });
+});
+
+describe('matchAlias', () => {
+  it.each([
+    ['@/*', '@/components/Button', 'components/Button'],
+    ['@/*', '@/', ''],
+    ['*.css', 'theme.css', 'theme'],
+    ['exact', 'exact', ''],
+    ['pre*suf', 'pre-mid-suf', '-mid-'],
+  ])('%s matches %s', (pattern, specifier, wildcard) => {
+    expect(matchAlias(pattern, specifier)).toBe(wildcard);
+  });
+
+  it.each([
+    ['@/*', '@components'],
+    ['exact', 'exactly'],
+    ['ab*ba', 'aba'],
+  ])('%s does not match %s', (pattern, specifier) => {
+    expect(matchAlias(pattern, specifier)).toBeNull();
+  });
+
+  it('stays fast on long adversarial input', () => {
+    const start = Date.now();
+    for (let i = 0; i < 1000; i++) matchAlias(`${'a'.repeat(5000)}*b`, 'a'.repeat(100_000));
+    expect(Date.now() - start).toBeLessThan(2000);
   });
 });
