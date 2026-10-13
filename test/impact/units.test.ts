@@ -4,15 +4,16 @@ import { dynamicTargetDirectory } from '../../src/impact/analyze.js';
 import { isGlobalConfig, seedKind, seedsFromDiff } from '../../src/impact/classify.js';
 import { isConfigFile, loadResolverConfig } from '../../src/impact/config.js';
 import { buildReverseIndex, computeImpact, sortCandidates, type ImportEdge, type Seed } from '../../src/impact/graph.js';
-import { isCodeFile, parseImports } from '../../src/impact/parseImports.js';
+import { isCodeFile, parseModule } from '../../src/impact/parseModule.js';
 import { createResolver, matchAlias, type RepoSnapshot } from '../../src/impact/resolve.js';
+import { buildSymbolEdges, exportNames, type ResolvedModule } from '../../src/impact/symbols.js';
 
 function snapshot(files: Record<string, string>, extraPaths: string[] = []): RepoSnapshot {
   return { paths: new Set([...Object.keys(files), ...extraPaths]), read: (path) => files[path] };
 }
 
-describe('parseImports', () => {
-  it('collects static imports, re-exports, require, literal import() and references', () => {
+describe('parseModule', () => {
+  it('collects imports, re-exports, require, literal import(), import types and references', () => {
     const source = `
       /// <reference path="./globals.d.ts" />
       import a from './a';
@@ -22,19 +23,106 @@ describe('parseImports', () => {
       const e = require('./e');
       const f = await import('./f');
       import './styles.css';
+      type G = import('./g').G;
     `;
-    const parsed = parseImports('src/x.ts', source);
-    expect(parsed.specifiers).toEqual([
-      { text: './a', kind: 'static' },
-      { text: '@/b', kind: 'static' },
-      { text: './c', kind: 'static' },
-      { text: '../d.js', kind: 'static' },
-      { text: './e', kind: 'static' },
-      { text: './f', kind: 'static' },
-      { text: './styles.css', kind: 'static' },
-      { text: './globals.d.ts', kind: 'reference' },
+    const parsed = parseModule('src/x.ts', source);
+    expect(parsed.imports).toEqual([
+      { specifier: './styles.css', imported: null, dependents: '*' },
+      { specifier: './a', imported: 'default', dependents: [] },
+      { specifier: '@/b', imported: 'B', dependents: [] },
+      { specifier: './e', imported: null, dependents: [] },
+      { specifier: './f', imported: null, dependents: [] },
+      { specifier: './g', imported: null, dependents: [] },
+      { specifier: './globals.d.ts', imported: null, dependents: '*' },
     ]);
+    expect(parsed.reexports).toEqual([
+      { specifier: './c', kind: 'star' },
+      { specifier: '../d.js', kind: 'named', imported: 'd', exported: 'd' },
+    ]);
+    expect(parsed.localExports).toEqual([]);
     expect(parsed.dynamic).toEqual([]);
+  });
+
+  it('records which exports use each import, through local declarations', () => {
+    const source = `
+      import { a } from './a';
+      import { b } from './b';
+      import { c } from './c';
+      import * as ns from './ns';
+      import { side } from './side';
+      const helper = () => a;
+      export function usesA() { return helper(); }
+      export const usesB = b;
+      export default class { m() { return ns; } }
+      export type T = typeof c;
+      side();
+      function unusedLocal() { return c; }
+      const lazy = () => import('./lazy');
+      export { lazy };
+    `;
+    const parsed = parseModule('src/x.ts', source);
+    expect(parsed.imports).toEqual([
+      { specifier: './a', imported: 'a', dependents: ['usesA'] },
+      { specifier: './b', imported: 'b', dependents: ['usesB'] },
+      { specifier: './c', imported: 'c', dependents: ['T'] },
+      { specifier: './ns', imported: null, dependents: ['default'] },
+      { specifier: './side', imported: 'side', dependents: '*' },
+      { specifier: './lazy', imported: null, dependents: ['lazy'] },
+    ]);
+    expect(parsed.localExports).toEqual(['usesA', 'usesB', 'default', 'T', 'lazy']);
+  });
+
+  it('tells re-exported bindings from used ones and lists local exports', () => {
+    const source = `
+      import { a, b as bee } from './ab';
+      import * as ns from './ns';
+      import def from './def';
+      import { used } from './used';
+      import { both } from './both';
+      export { a, bee as b2, ns };
+      export default def;
+      export { used, both };
+      console.log(used);
+      export * as all from './all';
+      export const [x, { y }] = arr;
+      export function f() { return both; }
+      export class K {}
+      export interface I {}
+      export type T = 1;
+      export enum E {}
+      const local = 1;
+      export { local as renamed };
+    `;
+    const parsed = parseModule('src/x.ts', source);
+    expect(parsed.reexports).toEqual([
+      { specifier: './ab', kind: 'named', imported: 'a', exported: 'a' },
+      { specifier: './ab', kind: 'named', imported: 'b', exported: 'b2' },
+      { specifier: './ns', kind: 'namespace', exported: 'ns' },
+      { specifier: './def', kind: 'named', imported: 'default', exported: 'default' },
+      { specifier: './used', kind: 'named', imported: 'used', exported: 'used' },
+      { specifier: './both', kind: 'named', imported: 'both', exported: 'both' },
+      { specifier: './all', kind: 'namespace', exported: 'all' },
+    ]);
+    expect(parsed.imports).toEqual([
+      { specifier: './used', imported: 'used', dependents: '*' },
+      { specifier: './both', imported: 'both', dependents: ['f'] },
+    ]);
+    expect(parsed.localExports).toEqual(['x', 'y', 'f', 'K', 'I', 'T', 'E', 'renamed']);
+  });
+
+  it('treats a namespace import as the whole module', () => {
+    expect(parseModule('x.ts', "import * as UI from './ui';\nexport const all = UI;\n").imports).toEqual([
+      { specifier: './ui', imported: null, dependents: ['all'] },
+    ]);
+  });
+
+  it('marks exports it cannot list (CommonJS, export =) as null', () => {
+    expect(parseModule('x.js', "module.exports = require('./y');\n")).toMatchObject({
+      imports: [{ specifier: './y', imported: null, dependents: '*' }],
+      localExports: null,
+    });
+    expect(parseModule('x.ts', 'const v = 1;\nexport = v;\n').localExports).toBeNull();
+    expect(parseModule('x.ts', 'export default function () {}\n').localExports).toEqual(['default']);
   });
 
   it('reports non-literal dynamic imports with their static prefix', () => {
@@ -44,7 +132,7 @@ describe('parseImports', () => {
       'const c = import(moduleName);',
       "const d = import('./literal');",
     ].join('\n');
-    expect(parseImports('x.js', source).dynamic).toEqual([
+    expect(parseModule('x.js', source).dynamic).toEqual([
       { staticPrefix: './locales/' },
       { staticPrefix: './plugins/' },
       { staticPrefix: null },
@@ -52,14 +140,82 @@ describe('parseImports', () => {
   });
 
   it('parses JSX in .js and .tsx files without failing', () => {
-    const parsed = parseImports('c.tsx', "import B from './B';\nexport const C = () => <B x={import(path)} />;");
-    expect(parsed.specifiers).toEqual([{ text: './B', kind: 'static' }]);
+    const parsed = parseModule('c.tsx', "import B from './B';\nexport const C = () => <B x={import(path)} />;");
+    expect(parsed.imports).toEqual([{ specifier: './B', imported: 'default', dependents: ['C'] }]);
+    expect(parsed.localExports).toEqual(['C']);
     expect(parsed.dynamic).toEqual([{ staticPrefix: null }]);
   });
 
   it('isCodeFile recognises JS/TS extensions only', () => {
     expect(['a.ts', 'a.tsx', 'a.mts', 'a.cjs', 'a.jsx', 'a.d.ts'].every(isCodeFile)).toBe(true);
     expect(['a.css', 'a.json', 'a.vue', 'ts'].some(isCodeFile)).toBe(false);
+  });
+});
+
+describe('symbols', () => {
+  const module = (partial: Partial<ResolvedModule>): ResolvedModule => ({ imports: [], reexports: [], localExports: new Set(), ...partial });
+  const ui = new Map<string, ResolvedModule>([
+    ['ui/Button.ts', module({ localExports: new Set(['Button', 'default']) })],
+    ['ui/Modal.ts', module({ localExports: new Set(['Modal']) })],
+    ['ui/legacy.js', module({ localExports: null })],
+    [
+      'ui/index.ts',
+      module({
+        reexports: [
+          { target: 'ui/Button.ts', kind: 'star' },
+          { target: 'ui/Modal.ts', kind: 'named', imported: 'Modal', exported: 'Dialog' },
+        ],
+      }),
+    ],
+    ['app.ts', module({ imports: [{ target: 'ui/index.ts', imported: 'Dialog', dependents: ['App'] }] })],
+  ]);
+
+  it('exportNames follows export * (without default) and propagates unknown exports', () => {
+    const names = exportNames(
+      new Map([
+        ...ui,
+        ['cycle/a.ts', module({ localExports: new Set(['a']), reexports: [{ target: 'cycle/b.ts', kind: 'star' }] })],
+        ['cycle/b.ts', module({ localExports: new Set(['b']), reexports: [{ target: 'cycle/a.ts', kind: 'star' }] })],
+        ['opaque.ts', module({ reexports: [{ target: 'ui/legacy.js', kind: 'star' }] })],
+      ]),
+    );
+    expect([...(names.get('ui/index.ts') ?? [])].sort()).toEqual(['Button', 'Dialog']);
+    expect([...(names.get('cycle/a.ts') ?? [])].sort()).toEqual(['a', 'b']);
+    expect(names.get('opaque.ts')).toBeNull();
+  });
+
+  it('links an importer to the name in the file defining it, through the barrel', () => {
+    const edges = buildSymbolEdges(ui);
+    expect(edges.filter((edge) => edge.from === 'app.ts')).toEqual([
+      { from: 'app.ts', to: 'ui/Modal.ts', kind: 'use', through: ['ui/index.ts'], names: ['Modal'], exports: ['App'] },
+      { from: 'app.ts', to: 'ui/index.ts', kind: 'through', through: [], names: '*', exports: ['App'] },
+    ]);
+    expect(edges.filter((edge) => edge.from === 'ui/index.ts')).toEqual([
+      { from: 'ui/index.ts', to: 'ui/Button.ts', kind: 'reexport', through: [], names: '*', exports: '*' },
+      { from: 'ui/index.ts', to: 'ui/Modal.ts', kind: 'reexport', through: [], names: ['Modal'], exports: ['Dialog'] },
+    ]);
+  });
+
+  it('falls back to everything the module re-exports for names it cannot find', () => {
+    const modules = new Map([...ui, ['old.ts', module({ imports: [{ target: 'ui/index.ts', imported: 'Removed', dependents: '*' }] })]]);
+    const targets = buildSymbolEdges(modules)
+      .filter((edge) => edge.from === 'old.ts' && edge.kind === 'use')
+      .map((edge) => [edge.to, edge.names]);
+    expect(targets).toEqual([
+      ['ui/index.ts', '*'],
+      ['ui/Button.ts', '*'],
+      ['ui/Modal.ts', '*'],
+    ]);
+  });
+
+  it('treats files without parsed exports as defining every name', () => {
+    const modules = new Map([
+      ['ui/index.ts', module({ reexports: [{ target: 'ui/gone.ts', kind: 'star' }] })],
+      ['app.ts', module({ imports: [{ target: 'ui/index.ts', imported: 'Anything', dependents: '*' }] })],
+    ]);
+    expect(buildSymbolEdges(modules).filter((edge) => edge.from === 'app.ts' && edge.kind === 'use')).toEqual([
+      { from: 'app.ts', to: 'ui/gone.ts', kind: 'use', through: ['ui/index.ts'], names: ['Anything'], exports: '*' },
+    ]);
   });
 });
 
@@ -235,8 +391,65 @@ describe('graph', () => {
 
   it('buildReverseIndex dedupes edges and drops self-imports', () => {
     const reverse = buildReverseIndex(edges);
-    expect(reverse.get('theme.ts')).toEqual(['button.tsx', 'other.ts']);
+    expect(reverse.get('theme.ts')).toEqual([
+      { from: 'button.tsx', kind: 'use', through: [], names: '*', exports: '*' },
+      { from: 'other.ts', kind: 'use', through: [], names: '*', exports: '*' },
+    ]);
     expect(reverse.has('self.ts')).toBe(false);
+  });
+
+  it('passes on only the exports whose code uses an affected import', () => {
+    // lib.useA uses util.a and lib.useB uses other.o; z uses lib.useA but exports nothing that does.
+    const nameEdges: ImportEdge[] = [
+      { from: 'lib.ts', to: 'util.ts', names: ['a'], exports: ['useA'] },
+      { from: 'lib.ts', to: 'other.ts', names: ['o'], exports: ['useB'] },
+      { from: 'x.ts', to: 'lib.ts', names: ['useA'] },
+      { from: 'y.ts', to: 'lib.ts', names: ['useB'] },
+      { from: 'z.ts', to: 'lib.ts', names: ['useA'], exports: [] },
+      { from: 'w.ts', to: 'z.ts' },
+    ];
+    const util = computeImpact([{ path: 'util.ts', kind: 'code', listed: true }], nameEdges, 5);
+    expect(util.candidates.map((c) => `${c.certainty}:${c.path}`)).toEqual(['confirmed:util.ts', 'confirmed:lib.ts', 'possible:x.ts', 'possible:z.ts']);
+    const both = computeImpact(
+      [
+        { path: 'util.ts', kind: 'code', listed: true },
+        { path: 'other.ts', kind: 'code', listed: true },
+      ],
+      nameEdges,
+      5,
+    );
+    expect(both.candidates.map((c) => c.path)).toEqual(['other.ts', 'util.ts', 'lib.ts', 'x.ts', 'y.ts', 'z.ts']);
+    expect(computeImpact([{ path: 'util.ts', kind: 'code', listed: true }], nameEdges, 1).depthLimited).toBe(true);
+  });
+
+  // page imports { Button } from the barrel ui/index.ts, which re-exports button.tsx and modal.tsx.
+  const barrelEdges: ImportEdge[] = [
+    { from: 'page.tsx', to: 'button.tsx', kind: 'use', through: ['ui/index.ts'] },
+    { from: 'page.tsx', to: 'ui/index.ts', kind: 'through', through: [] },
+    { from: 'ui/index.ts', to: 'button.tsx', kind: 'reexport', through: [] },
+    { from: 'ui/index.ts', to: 'modal.tsx', kind: 'reexport', through: [] },
+    { from: 'shell.tsx', to: 'page.tsx', kind: 'use', through: [] },
+  ];
+
+  it('lists barrels that re-export a changed file without expanding them, and shows them in the chain', () => {
+    const { candidates } = computeImpact([{ path: 'button.tsx', kind: 'code', listed: true }], barrelEdges, 5);
+    expect(candidates).toEqual([
+      { path: 'button.tsx', certainty: 'confirmed', reason: 'changed', depth: 0, via: ['button.tsx'] },
+      { path: 'page.tsx', certainty: 'confirmed', reason: 'imports-changed', depth: 1, via: ['page.tsx', 'ui/index.ts', 'button.tsx'] },
+      { path: 'ui/index.ts', certainty: 'confirmed', reason: 're-exports', depth: 1, via: ['ui/index.ts', 'button.tsx'] },
+      { path: 'shell.tsx', certainty: 'possible', reason: 'transitive', depth: 2, via: ['shell.tsx', 'page.tsx', 'ui/index.ts', 'button.tsx'] },
+    ]);
+    expect(computeImpact([{ path: 'modal.tsx', kind: 'code', listed: true }], barrelEdges, 5).candidates.map((c) => c.path)).toEqual([
+      'modal.tsx',
+      'ui/index.ts',
+    ]);
+  });
+
+  it('counts importers passing through a barrel only when the barrel itself changed', () => {
+    const changed = computeImpact([{ path: 'ui/index.ts', kind: 'code', listed: true }], barrelEdges, 5).candidates;
+    expect(changed.map((c) => `${c.reason}:${c.path}`)).toEqual(['changed:ui/index.ts', 'imports-changed:page.tsx', 'transitive:shell.tsx']);
+    const consumer = computeImpact([{ path: 'other.tsx', kind: 'code', listed: true }], [...barrelEdges, { from: 'ui/index.ts', to: 'other.tsx' }], 5);
+    expect(consumer.candidates.map((c) => c.path)).toEqual(['other.tsx', 'ui/index.ts']);
   });
 
   it('marks direct importers confirmed and transitive ones possible, with the import chain', () => {

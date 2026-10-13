@@ -1,7 +1,7 @@
 import path from 'node:path';
 import type { ChangedFile } from '../core/types.js';
 import type { Seed, SeedKind } from './graph.js';
-import { isCodeFile } from './parseImports.js';
+import { isCodeFile } from './parseModule.js';
 
 const GLOBAL_CONFIG_NAMES = new Set([
   'package.json',

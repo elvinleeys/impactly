@@ -121,7 +121,7 @@ bundle: skipped (Bundle comparison is not implemented yet)
 
 | 표시 | 의미 | 예시 |
 |---|---|---|
-| `confirmed` (확정) | 바뀐 파일 자체이거나, 바뀐 파일을 **직접 import** 하는 파일 | `Button.tsx`가 `theme.ts`를 import |
+| `confirmed` (확정) | 바뀐 파일 자체이거나, 바뀐 파일에 정의된 코드를 **직접 사용**하는 파일 (배럴 파일을 거쳐도 직접 사용으로 봄) | `Button.tsx`가 `theme.ts`의 `color`를 사용 |
 | `possible` (가능성) | 바뀐 파일을 **간접적으로** 사용하는 파일 (2단계 이상). 실제로 영향이 있는지는 확인 필요 | `App.tsx` → `Button.tsx` → `theme.ts` |
 | `unknown` (미확인) | 코드 분석만으로는 영향 범위를 알 수 없음 | `package.json`·설정 파일 변경, 변수로 경로를 만드는 동적 import |
 
@@ -133,11 +133,17 @@ bundle: skipped (Bundle comparison is not implemented yet)
 | `imports-changed` | 바뀐 파일을 직접 import 함 |
 | `imports-deleted` | **삭제되었거나 이름이 바뀐 파일을 아직 import 함 → 깨질 가능성이 높음** |
 | `transitive` | 다른 파일을 거쳐 간접적으로 연결됨 |
+| `re-exports` | 영향받은 코드를 직접 쓰지 않고 다시 export만 하는 파일 (배럴 파일) |
 | `dynamic-import` | `import(\`./locales/${lang}\`)`처럼 동적으로 불러오는 경로에 바뀐 파일이 포함될 수 있음 |
 | `config-change` | `package.json`, `tsconfig.json`, `*.config.js`, `.env` 등 프로젝트 전체에 영향을 주는 설정 변경 |
 | `non-code-change` | 아무도 import 하지 않는 코드 외 파일(문서, 이미지 등) 변경 |
 
-`via`는 연결 경로입니다. `src/App.tsx -> src/Button.tsx -> src/theme.ts`는 "App이 Button을, Button이 theme을 import 한다"는 뜻입니다.
+`via`는 연결 경로입니다. `src/App.tsx -> src/Button.tsx -> src/theme.ts`는 "App이 Button을, Button이 theme을 import 한다"는 뜻입니다. 중간에 배럴 파일(`components/index.ts` 등)이 있으면 경로에 함께 표시됩니다.
+
+영향 범위는 **이름 단위**로 따라갑니다.
+- 배럴 파일에서 `{ Modal }`만 가져온 파일은 `Modal`을 정의한 파일이 바뀔 때만 영향을 받습니다. 같은 배럴의 `Button`이 바뀌어도 영향을 받지 않습니다.
+- 영향받은 파일의 export 중에서도 바뀐 코드를 실제로 쓰는 export만 다음 단계로 전달합니다.
+- 이름을 정확히 따라갈 수 없을 때는 놓치지 않도록 넓게 잡습니다. `import * as X`, CommonJS, 더 이상 export되지 않는 이름이 그런 경우입니다.
 
 ### 단계별 상태 (`status`)
 
@@ -162,7 +168,8 @@ impactly/
 │   │   ├── collect.ts     # 두 커밋 사이의 변경 내용 수집
 │   │   └── tree.ts        # 커밋 안의 파일 목록 읽기
 │   ├── impact/        # import 관계를 따라 영향 범위 계산
-│   │   ├── parseImports.ts  # 파일에서 import/export 구문 추출
+│   │   ├── parseModule.ts   # 파일의 import/export와, 각 export가 쓰는 import 추출
+│   │   ├── symbols.ts       # 가져온 이름을 배럴 파일을 거쳐 정의된 파일까지 추적
 │   │   ├── resolve.ts       # './Button', '@/utils' 같은 경로를 실제 파일로 연결
 │   │   ├── config.ts        # tsconfig.json / jsconfig.json의 경로 별칭 읽기
 │   │   ├── classify.ts      # 변경 파일 분류 (코드 / 설정 / 기타)
@@ -188,7 +195,9 @@ impactly/
 
 ## ⚠️ 알려진 한계
 
-- **배럴 파일**(`index.ts`에서 모든 것을 다시 export 하는 파일)이 있으면 `possible` 결과가 매우 많아질 수 있습니다. 먼저 `confirmed` 항목부터 확인하는 것을 권장합니다.
+- 많은 파일이 쓰는 큰 컴포넌트(예: 앱 전체를 담은 `App.tsx`)를 거치면 `possible` 결과가 여전히 많을 수 있습니다. 먼저 `confirmed` 항목부터 확인하는 것을 권장합니다.
+- 파일 안의 의존 관계는 이름으로만 비교합니다. 같은 이름의 지역 변수가 있으면 실제보다 넓게 잡힐 수 있지만, 좁게 잡히지는 않습니다.
+- 모듈을 불러오기만 해도 실행되는 코드(부수 효과)는 배럴 파일을 거치면 따라가지 않습니다.
 - 모노레포에서는 루트의 `tsconfig.json`만 읽습니다 (패키지별 설정은 아직 미반영).
 - `.vue`, `.svelte`, `.mdx` 파일 내부의 import는 아직 분석하지 않습니다.
 - 타입만 가져오는 import(`import type`)도 일반 import와 동일하게 취급합니다.

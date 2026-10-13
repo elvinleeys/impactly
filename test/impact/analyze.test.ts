@@ -14,7 +14,7 @@ const APP = {
   'src/theme.ts': 'export const color = "red";\n',
   'src/Button.tsx': "import { color } from './theme';\nexport const Button = () => color;\n",
   'src/index.ts': "export * from './Button';\n",
-  'app/page.tsx': "import { Button } from '@/index';\nimport '@/styles.css';\nexport default Button;\n",
+  'app/page.tsx': "import { Button } from '@/index';\nimport '@/styles.css';\nexport default function Page() { return Button(); }\n",
   'app/about/page.tsx': "import React from 'react';\nexport default () => null;\n",
   'src/styles.css': 'body { color: red }\n',
   'src/i18n.ts': 'export const load = (lang: string) => import(`./locales/${lang}.json`);\n',
@@ -22,9 +22,9 @@ const APP = {
   'test/Button.test.tsx': "import { Button } from '../src/Button';\n",
 };
 
-async function analyze(changes: (r: TestRepo) => void, limits: Partial<Limits> = {}) {
+async function analyze(changes: (r: TestRepo) => void, limits: Partial<Limits> = {}, baseFiles: Record<string, string> = {}) {
   repo = createRepo();
-  repo.write(APP);
+  repo.write({ ...APP, ...baseFiles });
   const base = repo.commit('base');
   changes(repo);
   const head = repo.commit('head');
@@ -43,13 +43,108 @@ describe('analyzeImpact (integration)', () => {
     expect(summary(result.data?.candidates)).toEqual([
       'confirmed:changed:src/theme.ts',
       'confirmed:imports-changed:src/Button.tsx',
-      'possible:transitive:src/index.ts',
-      'possible:transitive:test/Button.test.tsx',
       'possible:transitive:app/page.tsx',
+      'possible:re-exports:src/index.ts',
+      'possible:transitive:test/Button.test.tsx',
     ]);
     const page = result.data?.candidates.find((c) => c.path === 'app/page.tsx');
     expect(page?.via).toEqual(['app/page.tsx', 'src/index.ts', 'src/Button.tsx', 'src/theme.ts']);
     expect(result.evidence.some((e) => e.detail.includes('tsconfig.json (1 path aliases)'))).toBe(true);
+  });
+
+  describe('barrel files', () => {
+    const UI = {
+      'src/ui/Button.tsx': 'export const Button = () => "button";\nexport const OldButton = () => "old";\n',
+      'src/ui/Modal.tsx': 'export const Modal = () => "modal";\nexport default Modal;\n',
+      'src/ui/Card.tsx': 'export default function Card() { return "card"; }\n',
+      'src/ui/index.ts': "export * from './Button';\nexport { Modal } from './Modal';\nexport { default as Card } from './Card';\n",
+      'src/lib/index.ts': "import { Modal } from '../ui/Modal';\nexport { Modal };\nexport * as ui from '../ui';\n",
+      'app/home.tsx': "import { Modal } from '@/ui';\nexport const Home = () => Modal();\n",
+      'app/settings.tsx': "import { Button } from '@/ui';\nexport const Settings = () => Button();\n",
+      'app/legacy.tsx': "import { OldButton } from '@/ui';\nexport const Legacy = () => OldButton();\n",
+      'app/cards.tsx': "import { Card } from '@/ui';\nexport const Cards = () => Card();\n",
+      'app/all.tsx': "import * as UI from '@/ui';\nexport const All = () => UI;\n",
+      'app/shell.tsx': "import { Settings } from './settings';\nimport { Home } from './home';\nexport const Shell = () => [Settings, Home];\n",
+      'app/lib-user.tsx': "import { Modal } from '@/lib';\nexport const X = () => Modal();\n",
+    };
+    const withUi = (change: (r: TestRepo) => void, extra: Record<string, string> = {}) => analyze(change, {}, { ...UI, ...extra });
+    const paths = (candidates: ImpactCandidate[] = []) => candidates.map((c) => c.path);
+
+    it('links importers of a barrel only to the files that define the names they use', async () => {
+      const result = await withUi((r) => { r.write({ 'src/ui/Button.tsx': 'export const Button = () => "new";\nexport const OldButton = () => "old";\n' }); });
+      expect(result.status).toBe('ok');
+      const candidates = summary(result.data?.candidates);
+      expect(candidates).toContain('confirmed:imports-changed:app/settings.tsx');
+      expect(candidates).toContain('confirmed:imports-changed:app/legacy.tsx');
+      expect(candidates).toContain('confirmed:imports-changed:app/all.tsx');
+      expect(candidates).toContain('confirmed:re-exports:src/ui/index.ts');
+      expect(candidates).toContain('possible:transitive:app/shell.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/home.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/cards.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/lib-user.tsx');
+      const settings = result.data?.candidates.find((c) => c.path === 'app/settings.tsx');
+      expect(settings?.via).toEqual(['app/settings.tsx', 'src/ui/index.ts', 'src/ui/Button.tsx']);
+    });
+
+    it('passes on only the exports of an affected file that use the changed import', async () => {
+      const result = await withUi((r) => { r.write({ 'src/ui/Button.tsx': 'export const Button = () => "new";\nexport const OldButton = () => "old";\n' }); }, {
+        'src/ui/types.ts': "import type { Button } from './Button';\nexport type ButtonProps = Parameters<typeof Button>;\nexport type Size = 'sm' | 'lg';\n",
+        'app/sized.tsx': "import type { Size } from '../src/ui/types';\nexport const size: Size = 'sm';\n",
+        'app/props.tsx': "import type { ButtonProps } from '../src/ui/types';\nexport const props: ButtonProps = [];\n",
+      });
+      const candidates = summary(result.data?.candidates);
+      expect(candidates).toContain('confirmed:imports-changed:src/ui/types.ts');
+      expect(candidates).toContain('possible:transitive:app/props.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/sized.tsx');
+    });
+
+    it('follows default re-exports and imported bindings that are exported again', async () => {
+      const result = await withUi((r) => { r.write({ 'src/ui/Modal.tsx': 'export const Modal = () => "new";\nexport default Modal;\n' }); });
+      const candidates = summary(result.data?.candidates);
+      expect(candidates).toContain('confirmed:imports-changed:app/home.tsx');
+      expect(candidates).toContain('confirmed:imports-changed:app/lib-user.tsx');
+      expect(candidates).toContain('confirmed:re-exports:src/lib/index.ts');
+      expect(paths(result.data?.candidates)).not.toContain('app/settings.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/cards.tsx');
+
+      const card = await withUi((r) => { r.write({ 'src/ui/Card.tsx': 'export default function Card() { return "new"; }\n' }); });
+      expect(summary(card.data?.candidates)).toContain('confirmed:imports-changed:app/cards.tsx');
+      expect(paths(card.data?.candidates)).not.toContain('app/home.tsx');
+    });
+
+    it('keeps importers of a name the PR stopped exporting', async () => {
+      const result = await withUi((r) => { r.write({ 'src/ui/Button.tsx': 'export const Button = () => "button";\n' }); });
+      expect(summary(result.data?.candidates)).toContain('confirmed:imports-changed:app/legacy.tsx');
+    });
+
+    it('treats every importer of a changed barrel as affected', async () => {
+      const result = await withUi((r) => { r.write({ 'src/ui/index.ts': "export * from './Button';\nexport { Modal } from './Modal';\n" }); });
+      const candidates = summary(result.data?.candidates);
+      expect(candidates).toContain('confirmed:imports-changed:app/home.tsx');
+      expect(candidates).toContain('confirmed:imports-changed:app/cards.tsx');
+      expect(candidates).toContain('confirmed:imports-changed:app/settings.tsx');
+    });
+
+    it('reports a barrel that re-exports a deleted file and the importers of that name', async () => {
+      const result = await withUi((r) => { r.remove('src/ui/Card.tsx'); });
+      const candidates = summary(result.data?.candidates);
+      expect(candidates).toContain('confirmed:imports-deleted:src/ui/index.ts');
+      expect(candidates).toContain('confirmed:imports-deleted:app/cards.tsx');
+      expect(paths(result.data?.candidates)).not.toContain('app/home.tsx');
+    });
+
+    it('survives re-export cycles without dropping importers', async () => {
+      const result = await withUi(
+        (r) => { r.write({ 'src/cycle/b.ts': "export * from './a';\nexport const b = 2;\n" }); },
+        {
+          'src/cycle/a.ts': "export * from './b';\nexport const a = 1;\n",
+          'src/cycle/b.ts': "export * from './a';\nexport const b = 1;\n",
+          'src/cycle/user.ts': "import { b, missing } from './a';\nexport const u = [b, missing];\n",
+        },
+      );
+      expect(result.status).toBe('ok');
+      expect(summary(result.data?.candidates)).toContain('confirmed:imports-changed:src/cycle/user.ts');
+    });
   });
 
   it('reports importers of a deleted file as confirmed imports-deleted', async () => {
