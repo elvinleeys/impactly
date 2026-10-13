@@ -41,15 +41,15 @@ Impactly는 PR을 자동으로 살펴보고 PR에 **댓글**을 남깁니다.
 
 ## 📌 현재 개발 상태
 
-> ⚠️ **아직 다른 저장소에 설치해서 쓰는 GitHub Action(Marketplace)으로는 배포되지 않았습니다.** 지금은 **이 저장소의 PR에 댓글이 달리고**, 다른 프로젝트는 **명령줄(CLI)로 로컬에서** 분석할 수 있습니다.
+> 🚀 **GitHub Action(`Impactly PR Review`)으로 쓸 수 있도록 준비했습니다.** 첫 버전(`v1`)이 GitHub Marketplace에 게시되면, 아래 [내 저장소에서 사용하기](#-내-저장소에서-사용하기-github-action)처럼 파일 2개만 추가하면 됩니다. 설치나 다운로드는 필요 없습니다.
 
 | 기능 | 상태 |
 |---|---|
 | 바뀐 파일 / 바뀐 줄 분석 (Git diff) | ✅ 사용 가능 |
 | import 관계를 따라가는 영향 범위 분석 (이름 단위) | ✅ 사용 가능 |
 | 규칙 기반 리뷰 제안 (아래 표, 무료·외부 서비스 없음) | ✅ 사용 가능 |
-| 쉬운 한국어 PR 댓글 (이 저장소) | ✅ 사용 가능 |
-| 다른 저장소에서 쓰는 GitHub Action으로 배포 (규칙 기반 리뷰로 제공) | 🚧 개발 예정 |
+| 쉬운 한국어 PR 댓글 | ✅ 사용 가능 |
+| 다른 저장소에서 쓰는 GitHub Action (규칙 기반 리뷰로 제공) | ✅ 준비 완료 (Marketplace 게시 대기) |
 | 관련 테스트 실행 · JavaScript 번들 크기 비교 | 🚧 개발 예정 |
 | Lighthouse 성능 지표 비교 | 🗓️ 이후 단계 |
 | AI 리뷰 제안 (본인 API 키를 등록했을 때만 동작하는 선택 기능) | 🗓️ 추후 개발 |
@@ -57,6 +57,126 @@ Impactly는 PR을 자동으로 살펴보고 PR에 **댓글**을 남깁니다.
 Marketplace 첫 배포는 **규칙 기반 리뷰만으로** 제공합니다. API 키나 사용료 없이 누구나 쓸 수 있게 하기 위해서이고, AI 리뷰는 추후 선택 기능으로 개발합니다.
 
 **실행하지 않은 검사를 "성공"으로 표시하지 않습니다.** 아직 없는 기능은 댓글에 "⏸️ 아직 지원하지 않아요"로 나옵니다.
+
+---
+
+## 📦 내 저장소에서 사용하기 (GitHub Action)
+
+GitHub Action은 내려받아 설치하는 프로그램이 아닙니다. **내 저장소에 워크플로 파일(YAML)을 추가하면** GitHub가 PR마다 알아서 실행합니다. 아래 파일 2개를 내 저장소의 `.github/workflows/` 폴더에 그대로 만들어 주세요.
+
+### 파일 1: `.github/workflows/impactly.yml` (PR 분석)
+
+```yaml
+name: Impactly
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  analyze:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0 # 비교할 두 커밋이 모두 필요해요
+          persist-credentials: false
+
+      - uses: elvinleeys/impactly@v1
+        with:
+          mode: analyze
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: impactly-report
+          path: impactly-report/
+          retention-days: 7
+```
+
+### 파일 2: `.github/workflows/impactly-comment.yml` (PR 댓글)
+
+```yaml
+name: Impactly comment
+
+on:
+  workflow_run:
+    workflows: [Impactly] # 파일 1의 name과 같아야 해요
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    permissions:
+      actions: read # 분석 결과 내려받기
+      pull-requests: write # 댓글 달기
+    steps:
+      - uses: actions/download-artifact@v8
+        continue-on-error: true
+        with:
+          name: impactly-report
+          path: ${{ runner.temp }}/impactly-report
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ github.token }}
+
+      - uses: elvinleeys/impactly@v1
+        with:
+          mode: comment
+          report-dir: ${{ runner.temp }}/impactly-report
+```
+
+두 파일을 **기본 브랜치(`main`)에 merge한 뒤부터** PR마다 댓글이 달립니다. 파일 2(`workflow_run`)는 GitHub 규칙상 기본 브랜치에 있어야 동작합니다.
+
+### 왜 파일이 2개인가요?
+
+fork(개인 저장소)에서 온 PR은 GitHub가 **읽기 전용**으로 실행합니다. 남의 PR 코드가 내 저장소에 글을 쓰거나 비밀값을 읽지 못하게 하기 위해서입니다. 그래서 다음과 같이 나눴습니다.
+
+```text
+PR 올림 / 새 커밋 push
+   │
+   ▼
+① 파일 1 (pull_request, 읽기 전용, 비밀값 없음)
+   - PR을 분석해서 결과(report.json)를 저장하고 올려 둠
+   │
+   ▼
+② 파일 2 (workflow_run, 댓글 쓰기 권한)
+   - PR 코드는 실행하지 않고, ①의 결과를 엄격하게 검사
+   - PR의 최신 커밋이 분석한 커밋과 같을 때만 한국어 댓글을 달거나 고쳐 씀
+```
+
+PR 쪽에서 만든 결과는 조작될 수 있다고 보고, **파일 경로 같은 값만 가져다 쓰며 댓글 문장은 Impactly가 직접 만듭니다.**
+
+> 💡 **같은 저장소 안의 PR만 쓴다면** 파일 1 하나로도 됩니다. `permissions`에 `pull-requests: write`를 추가하고, `upload-artifact` 대신 `uses: elvinleeys/impactly@v1` / `with: { mode: comment }` 단계를 이어 붙이면 됩니다. 다만 이렇게 하면 fork에서 온 PR에는 댓글이 달리지 않습니다.
+
+### 입력값
+
+| 입력 | 설명 | 기본값 |
+|---|---|---|
+| `mode` | `analyze`(분석) 또는 `comment`(댓글) | **필수** |
+| `report-dir` | 분석 결과를 저장하거나 읽을 폴더 | `impactly-report` |
+| `github-token` | 댓글을 쓸 토큰 (`comment` 모드) | `${{ github.token }}` |
+| `path` | 분석할 저장소 폴더 (`analyze` 모드) | `.` |
+| `max-depth` | 영향 범위를 몇 단계까지 따라갈지 | `5` |
+| `max-files` | 보고할 최대 변경 파일 수 | `3000` |
+
+### 버전 고르기
+
+| 이렇게 쓰면 | 업데이트 |
+|---|---|
+| `elvinleeys/impactly@v1` | `v1` 안의 개선 사항이 **자동으로 반영**돼요 (추천) |
+| `elvinleeys/impactly@v1.0.0` 또는 커밋 SHA | 직접 버전을 올려야 반영돼요 (보안을 중시하는 팀에 추천) |
+
+기존 사용법을 깨뜨리는 큰 변경은 `v2`처럼 새 메이저 버전으로 내기 때문에, `@v1`을 쓰면 갑자기 동작이 바뀌지 않습니다.
+
+### 문제가 생겼을 때
+
+- **"PR diff를 읽지 못했어요" 알림이 떠요:** 파일 1의 checkout에 `fetch-depth: 0`이 있는지 확인해 주세요.
+- **댓글이 안 달려요:** 파일 2가 기본 브랜치에 있는지, 파일 2의 `workflows: [...]`가 파일 1의 `name`과 같은지 확인해 주세요. 저장소 **Settings → Actions → General → Workflow permissions**에서 쓰기 권한을 막아 두었다면, 파일 2의 `permissions`로 필요한 권한만 열어 주면 됩니다.
+- **분석 결과는 어디서 보나요?** 댓글 외에도 파일 1 실행 화면의 **Summary** 탭에서 같은 내용을 볼 수 있어요.
 
 ---
 
@@ -89,30 +209,9 @@ Marketplace 첫 배포는 **규칙 기반 리뷰만으로** 제공합니다. API
 
 ---
 
-## 💬 PR 댓글이 달리는 방식 (이 저장소)
+## 🖥️ 로컬에서 실행하기 (CLI)
 
-```text
-PR 올림 / 새 커밋 push
-   │
-   ▼
-① CI의 "Impactly report" 작업 (.github/workflows/ci.yml)
-   - 읽기 전용 권한, 비밀값 없음 → fork PR에서도 안전
-   - PR을 분석해서 report.json을 만들고 결과물(artifact)로 올림
-   │
-   ▼
-② "Impactly comment" 워크플로 (.github/workflows/impactly-comment.yml)
-   - main 브랜치의 코드로 실행 (PR 코드는 실행하지 않음)
-   - report.json을 엄격하게 검사하고, PR의 최신 커밋이 분석한 커밋과 같은지 확인
-   - 한국어 댓글을 직접 만들어 PR에 달거나, 이전 댓글을 고쳐 씀
-```
-
-두 단계로 나눈 이유: fork에서 온 PR의 검사는 GitHub가 **읽기 전용**으로 실행하기 때문에 댓글을 달 수 없습니다. 그래서 댓글은 신뢰할 수 있는 `main` 브랜치 코드가 따로 답니다. PR 쪽에서 만든 결과는 조작될 수 있다고 보고 **파일 경로 같은 값만 가져다 쓰며, 댓글 문장은 직접 만듭니다.**
-
-> `workflow_run` 워크플로는 GitHub 규칙상 **`main`에 merge된 뒤부터** 동작합니다.
-
----
-
-## 🚀 로컬에서 실행하기 (CLI)
+PR에 올리기 전에 내 컴퓨터에서 같은 결과를 미리 보고 싶을 때 씁니다.
 
 ### 1. 준비물
 
@@ -221,10 +320,13 @@ impactly/
 │   ├── github/        # GitHub API (이 폴더에서만 호출)
 │   │   ├── validate.ts      # PR 쪽에서 온 결과를 엄격하게 검사
 │   │   └── comment.ts       # PR 댓글 작성·수정
+│   ├── action/        # GitHub Action 진입점 (analyze / comment 모드)
 │   └── entry/
 │       ├── run.ts         # 전체 분석 실행 → 리포트 생성
 │       ├── cli.ts         # 명령줄 실행 진입점
 │       └── comment.ts     # 댓글 게시 진입점 (워크플로에서 사용)
+├── action.yml         # GitHub Action 설정 (이름, 입력값, 실행 파일)
+├── action-dist/       # Action이 실제로 실행하는 파일 (npm run bundle로 생성, 직접 수정 금지)
 ├── test/              # 테스트 (실행 시 임시 Git 저장소를 만들어 검증)
 ├── .github/workflows/ # CI, 보안 검사, PR 댓글 워크플로
 ├── dist/              # 빌드 결과물 (npm run build 시 생성)
@@ -263,6 +365,7 @@ npx vitest run -t "rename"                # 이름에 rename이 들어간 테스
 npm run typecheck                         # 타입 검사
 npm run lint                              # 코드 스타일 검사
 npm run build                             # dist/ 로 빌드
+npm run bundle                            # action-dist/ 로 Action 묶기 (src를 고쳤다면 커밋 전에 꼭 실행)
 ```
 
 > `typescript`는 `6.0.3`으로 고정되어 있습니다. TypeScript 7에는 이 도구가 사용하는 컴파일러 API가 없으므로 임의로 올리지 마세요.
@@ -271,7 +374,7 @@ npm run build                             # dist/ 로 빌드
 
 | 검사 | 실행 시점 | merge 차단 |
 |---|---|---|
-| **CI** (`.github/workflows/ci.yml`): 타입 검사, lint, 테스트, 빌드 + Impactly 분석 | PR·`main` push마다 자동 | ❌ 결과만 표시 |
+| **CI** (`.github/workflows/ci.yml`): 타입 검사, lint, 테스트, 빌드, `action-dist/` 최신 여부 + Impactly 분석(`uses: ./`) | PR·`main` push마다 자동 | ❌ 결과만 표시 |
 | **Impactly 댓글** (`.github/workflows/impactly-comment.yml`): 분석 결과를 PR 댓글로 게시 | CI가 끝난 뒤 자동 | ❌ 댓글만 작성 |
 | **보안 검사** (`.github/workflows/security.yml`, 상태 이름 `security-gate`) | PR마다 자동 | ✅ 실패하면 merge 불가 |
 

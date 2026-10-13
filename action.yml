@@ -1,0 +1,41 @@
+name: Impactly PR Review
+description: PR의 바뀐 파일, 영향받는 파일, 고치면 좋을 점을 쉬운 한국어 댓글로 알려줘요. 무료, 서버·API 키 불필요, fork PR 지원.
+author: elvinleeys
+branding:
+  icon: git-pull-request
+  color: blue
+
+inputs:
+  mode:
+    description: >-
+      analyze: pull_request 이벤트에서 PR을 분석해 report-dir에 결과를 저장해요(읽기 권한만 필요).
+      comment: 저장된 결과로 PR 댓글을 달거나 고쳐 써요(pull-requests: write 필요).
+    required: true
+  github-token:
+    description: comment 모드에서 댓글을 쓸 토큰이에요.
+    required: false
+    default: ${{ github.token }}
+  report-dir:
+    description: 분석 결과(report.json, pr-number.txt)를 저장하거나 읽을 폴더예요. 작업 폴더 기준 경로예요.
+    required: false
+    default: impactly-report
+  path:
+    description: analyze 모드에서 분석할 저장소 폴더예요(체크아웃 위치). fetch-depth 0으로 체크아웃해야 해요.
+    required: false
+    default: .
+  max-depth:
+    description: 영향 범위를 몇 단계까지 따라갈지 정해요.
+    required: false
+  max-files:
+    description: 보고할 최대 변경 파일 수예요.
+    required: false
+
+outputs:
+  report-dir:
+    description: analyze 모드에서 결과를 저장한 폴더의 절대 경로예요.
+  comment-id:
+    description: comment 모드에서 만들거나 고친 댓글의 ID예요.
+
+runs:
+  using: node24
+  main: action-dist/index.cjs

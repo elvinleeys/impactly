@@ -16,11 +16,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "eslint .",
     "test": "vitest run",
-    "test:watch": "vitest"
+    "test:watch": "vitest",
+    "bundle": "esbuild src/action/index.ts --bundle --platform=node --target=node24 --format=cjs --outfile=action-dist/index.cjs --legal-comments=external --log-level=warning"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^24.19.2",
+    "esbuild": "0.28.2",
     "eslint": "^10.12.0",
     "typescript-eslint": "^8.71.2",
     "vitest": "^5.0.4"
