@@ -32,13 +32,18 @@ Pipeline (`src/entry/run.ts` → `buildReport`):
 
 1. **`src/git/collect.ts` `collectDiff`** — validates and resolves SHAs, diffs merge-base(base, head)..head by default. It makes three git calls: `--name-status -z`, `--numstat -z` and `--unified=0` (patch). `parse.ts` pairs the patch file blocks with name-status entries **by order** (file names are never parsed out of the patch). If the counts differ or the patch exceeds `maxDiffBytes`, hunks become `null` instead of failing.
 2. **`src/impact/analyze.ts` `analyzeImpact`** — reads the **head commit from the git object database** (`ls-tree` + `cat-file --batch`), not the working tree. Symlinks, submodules and `node_modules` are skipped.
-   - It parses imports with the TypeScript compiler API (`parseImports.ts`) and resolves them in memory (`resolve.ts`) against a virtual root `/__repo__`, so resolution can never touch the real filesystem.
-   - It builds the import edges, then `graph.ts` `computeImpact` runs a BFS over the reverse graph from the seeds produced by `classify.ts`.
+   - It parses each module with the TypeScript compiler API (`parseModule.ts`) and resolves specifiers in memory (`resolve.ts`) against a virtual root `/__repo__`, so resolution can never touch the real filesystem.
+   - `parseModule` records per import binding which of the module's exports use it (`dependents`, through top-level declarations; `'*'` when module-level code uses it), plus re-exports and local export names.
+   - `symbols.ts` `buildSymbolEdges` follows each imported name through re-exports to the defining file. Edges carry `names` (what of `to` is used) and `exports` (what of `from` is then affected).
+   - `graph.ts` `computeImpact` runs a name-level BFS over the reverse graph from the seeds produced by `classify.ts`.
 3. Each stage returns a `Section<T>` with `{ status, data?, reason?, evidence[] }` (`src/core/types.ts`). Errors are caught per section, so a failing section does not abort the others.
 
 Impact semantics (keep these consistent when extending):
 - Seeds: changed files. Deleted files and the *old* path of a rename become `removed` seeds. Their paths are added to the resolver's path set so that importers still pointing at them resolve and are reported as `imports-deleted`.
-- Depth 1 importers are `confirmed`; depth ≥ 2 are `possible`. A dynamic `import()` whose static prefix directory contains a changed file is reported as `unknown`. Config files (`classify.ts` `isGlobalConfig`) and non-code files with no importers are `unknown` scope.
+- Propagation is by export name: an importer is hit only if it uses an affected export, and only its exports whose code uses that import propagate further. Changed files have all exports affected.
+- Edge kinds: `use` (code uses the definition), `reexport` (barrel passes it on; listed as `re-exports`, never expanded), `through` (importer passed through a barrel; only counts when that barrel itself changed). Depth counts `use` steps; barrels appear in `via` but add no depth.
+- When a name cannot be followed (namespace import, CommonJS/`export =`, unparsed file, a name no longer exported, re-export cycle), fall back to the whole module. Precision may degrade; recall must not.
+- Depth 1 users are `confirmed`; depth ≥ 2 are `possible`. A dynamic `import()` whose static prefix directory contains a changed file is reported as `unknown`. Config files (`classify.ts` `isGlobalConfig`) and non-code files with no importers are `unknown` scope.
 - Unresolved imports are only surfaced (as evidence) for changed files. Bare specifiers that match no alias are treated as external packages.
 - Hitting `maxDepth`, `maxGraphNodes`, `maxTotalBytes` or `maxFiles`, or a file the parser cannot handle, sets the status to `truncated` with a reason. It must never be silently `ok`.
 - `tsconfig` `paths` from the analysed repo are untrusted: aliases are matched with plain prefix/suffix comparison (`matchAlias`), never by building a RegExp from config text.
@@ -63,7 +68,8 @@ Path aliases: `config.ts` reads the root `tsconfig.json`/`jsconfig.json` (follow
 
 ## Known limitations
 
-- Barrel files (`index.ts` re-exporting everything) make `possible` candidates explode. On excalidraw, a 2-file change yielded about 500 `possible` files out of 710.
+- Hub files still fan out: on excalidraw a 2-file change yields about 256 `possible` files (down from about 500 before name-level tracking), mostly through `App.tsx`. A class or object counts as one declaration, so using any import anywhere in it affects that whole export.
+- Identifier matching is by name, not scope (shadowing can only over-report). Module side effects reached through barrels are not tracked.
 - Only the root tsconfig is read (monorepo package configs are ignored).
 - `.vue`, `.svelte` and `.mdx` files are not parsed.
 - Type-only imports are treated like runtime imports.

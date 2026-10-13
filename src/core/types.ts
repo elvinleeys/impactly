@@ -67,6 +67,8 @@ export type ImpactReason =
   | 'imports-changed'
   | 'imports-deleted'
   | 'transitive'
+  /** A barrel file that passes on (re-exports) affected code without using it. */
+  | 're-exports'
   | 'dynamic-import'
   | 'config-change'
   | 'non-code-change';
@@ -75,9 +77,12 @@ export interface ImpactCandidate {
   path: string;
   certainty: Certainty;
   reason: ImpactReason;
-  /** Distance from the nearest changed file in the reverse import graph (0 = changed itself). */
+  /**
+   * Number of files using code from the next one between this file and the nearest changed file
+   * (0 = changed itself). Barrels that only re-export do not add depth; they still appear in `via`.
+   */
   depth: number;
-  /** Import chain from this file to the changed file it depends on, e.g. [page.tsx, Button.tsx]. */
+  /** Import chain from this file to the changed file it depends on, including barrels, e.g. [page.tsx, components/index.ts, Button.tsx]. */
   via: string[];
 }
 

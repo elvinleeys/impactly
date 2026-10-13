@@ -6,9 +6,10 @@ import { readBlobs } from '../git/runner.js';
 import { listTree, type TreeEntry } from '../git/tree.js';
 import { seedsFromDiff } from './classify.js';
 import { isConfigFile, loadResolverConfig } from './config.js';
-import { computeImpact, sortCandidates, type ImportEdge } from './graph.js';
-import { isCodeFile, parseImports } from './parseImports.js';
+import { computeImpact, sortCandidates } from './graph.js';
+import { isCodeFile, parseModule, type ModuleSyntax } from './parseModule.js';
 import { createResolver, type RepoSnapshot } from './resolve.js';
+import { buildSymbolEdges, type ResolvedImport, type ResolvedModule, type ResolvedReexport } from './symbols.js';
 
 export interface ImpactInput {
   cwd: string;
@@ -91,7 +92,7 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
     evidence.push(...configEvidence);
     const resolver = createResolver(snapshot, config);
 
-    const edges: ImportEdge[] = [];
+    const modules = new Map<string, ResolvedModule>();
     const unknown: ImpactCandidate[] = [];
     const changedOrRemoved = [...changed, ...removedPaths];
     let unresolvedSpecifiers = 0;
@@ -102,27 +103,42 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
     for (const entry of codeEntries) {
       const content = contents.get(entry.path);
       if (content === undefined) continue;
-      let parsed: ReturnType<typeof parseImports>;
+      let parsed: ModuleSyntax;
       try {
-        parsed = parseImports(entry.path, content);
+        parsed = parseModule(entry.path, content);
       } catch {
         // e.g. pathologically nested code overflowing the parser's stack; isolate it to this file.
         unparsable.push(entry.path);
         continue;
       }
       analyzedFiles++;
-      for (const specifier of parsed.specifiers) {
-        const resolution = resolver.resolve(entry.path, specifier.text);
-        if (resolution.kind === 'internal') {
-          edges.push({ from: entry.path, to: resolution.path });
-        } else if (resolution.kind === 'unresolved') {
+      const resolveTarget = (specifier: string): string | null => {
+        const resolution = resolver.resolve(entry.path, specifier);
+        if (resolution.kind === 'internal') return resolution.path;
+        if (resolution.kind === 'unresolved') {
           unresolvedSpecifiers++;
           // Only changed files are reported: an unresolved import there may be a break the PR introduced.
           if (changed.has(entry.path)) {
             evidence.push({ source: 'import-graph', detail: `${entry.path}: ${resolution.reason}` });
           }
         }
+        return null;
+      };
+      const imports: ResolvedImport[] = [];
+      for (const { specifier, ...rest } of parsed.imports) {
+        const target = resolveTarget(specifier);
+        if (target !== null) imports.push({ target, ...rest });
       }
+      const reexports: ResolvedReexport[] = [];
+      for (const { specifier, ...rest } of parsed.reexports) {
+        const target = resolveTarget(specifier);
+        if (target !== null) reexports.push({ target, ...rest });
+      }
+      modules.set(entry.path, {
+        imports,
+        reexports,
+        localExports: parsed.localExports === null ? null : new Set(parsed.localExports),
+      });
       for (const dynamic of parsed.dynamic) {
         const directory = dynamicTargetDirectory(entry.path, dynamic.staticPrefix);
         if (directory === null) {
@@ -145,6 +161,7 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
       });
     }
 
+    const edges = buildSymbolEdges(modules);
     const result = computeImpact(seedsFromDiff(diff.files), edges, limits.maxDepth);
     if (result.depthLimited) truncate(`Dependents beyond depth ${limits.maxDepth} were not explored`);
 
