@@ -59,10 +59,21 @@ jobs:
             echo "The CI run has no impactly-report artifact (it may have been cancelled); nothing to post."
           fi
 
+      # Optional AI review. It runs only when the repository has an ANTHROPIC_API_KEY secret, and by
+      # default only for PRs by owners, members, collaborators and earlier contributors, so that
+      # strangers cannot spend the key. The model sees the PR diff as data; it runs no code, and its
+      # answer is verified against the diff before anything reaches the comment.
+      # Settings (Settings → Secrets and variables → Actions):
+      #   secret   ANTHROPIC_API_KEY
+      #   variable IMPACTLY_AI_MODEL    (default claude-sonnet-5-5)
+      #   variable IMPACTLY_AI_AUTHORS  (default OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR)
       - name: Post comment
         if: steps.download.outputs.dir != ''
         env:
           GITHUB_TOKEN: ${{ github.token }}
           HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
           REPORT_DIR: ${{ steps.download.outputs.dir }}
+          ANTHROPIC_API_KEY: ${{ secrets.ANTHROPIC_API_KEY }}
+          IMPACTLY_AI_MODEL: ${{ vars.IMPACTLY_AI_MODEL }}
+          IMPACTLY_AI_AUTHORS: ${{ vars.IMPACTLY_AI_AUTHORS }}
         run: node dist/entry/comment.js --report "$REPORT_DIR/report.json" --pr-file "$REPORT_DIR/pr-number.txt" --head-sha "$HEAD_SHA"

@@ -10,7 +10,7 @@ Impactly is a (planned) free GitHub Marketplace JavaScript Action that analyses 
 
 Work proceeds in gated stages:
 - **Done:** git diff collection (`src/git`), name-level impact analysis (`src/impact`), rule-based review (`src/review`), the Korean Markdown comment (`src/report`), and posting it on this repo's PRs (`src/github`, `.github/workflows/impactly-comment.yml`).
-- **Next:** optional AI review suggestions, used only when the user supplies their own Claude API key.
+- **Done:** an optional AI review (`src/ai`). It runs only with the owner's `ANTHROPIC_API_KEY` secret.
 - **Not yet built:** packaging as a reusable Marketplace Action, test discovery/execution, bundle comparison, Lighthouse (later). `Report.tests` and `Report.bundle` are always `skipped` for now.
 
 ## Commands
@@ -43,6 +43,15 @@ Pipeline (`src/entry/run.ts` → `buildReport`):
 3. **`src/review/review.ts` `runReview`**: reads the lines the PR added, by slicing the head blobs with the diff hunks. `rules.ts` `reviewFindings` is pure and turns facts into `ReviewFinding`s. A finding holds only structured data: rule id, file, line, count, related paths, specifier.
 4. **`src/report/markdown.ts` `renderMarkdown`**: Report → Korean comment. It writes every sentence itself (`describeFinding`) and renders repository-derived strings only through `code()`, an escaped inline code span. It never renders `reason` or `evidence` free text. Lists are capped and the output stays under GitHub's 65,536-character limit.
 5. **`src/github/`**: the only code that calls the GitHub API. `validate.ts` `validateReport` rebuilds an untrusted report.json field by field. `comment.ts` `publishReport` checks that the PR's current head equals the analysed head (otherwise it returns `stale`), then creates or updates the comment. The comment is found by `COMMENT_MARKER` **and** the `github-actions[bot]` author.
+
+6. **`src/ai/`** (optional) runs inside `publishReport`, so only in the trusted `workflow_run` job.
+   - It runs only when `ANTHROPIC_API_KEY` is set and the PR `author_association` is in `IMPACTLY_AI_AUTHORS` (default `OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR`, which protects the key from strangers).
+   - It fetches the PR diff from the API and sends the analysis facts plus the diff to the Messages API with a forced `submit_review` tool. The diff is fenced as `<untrusted_pr_diff>`.
+   - `schema.ts` `verifyAiOutput` keeps a suggestion only if its `quote` appears on an **added** line of that file; the line number is corrected if needed.
+   - Files must be known to the analysis, and certainty always comes from the report.
+   - `executed_checks` and `performance_changes` are never taken from the model.
+   - The renderer shows model text only through `prose()`, which strips links, @mentions, #refs, HTML and formatting. Code goes only into an unbreakable fenced block.
+   - Failures map to reason codes (`no-key`, `author-not-allowed`, `invalid-key`, `rate-limited`, …). The rule-based comment is posted either way.
 
 Each stage returns a `Section<T>` with `{ status, data?, reason?, evidence[] }` (`src/core/types.ts`). Errors are caught per section, so a failing section does not abort the others.
 

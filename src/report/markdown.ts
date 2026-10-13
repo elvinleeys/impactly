@@ -1,4 +1,6 @@
 import type { ChangeKind, ImpactCandidate, Report, ReviewFinding, Section, Status } from '../core/types.js';
+import type { AiFailReason, AiSection, AiSkipReason } from '../ai/review.js';
+import type { AiSeverity } from '../ai/schema.js';
 import { RULE_SEVERITY, type Severity } from '../review/severity.js';
 
 /**
@@ -6,7 +8,8 @@ import { RULE_SEVERITY, type Severity } from '../review/severity.js';
  *
  * Every value that comes from the analysed repository (paths, import specifiers) is shown only
  * inside an escaped code span, and every sentence is written here. The report may come from an
- * untrusted PR run, so its free-text fields (`reason`, `evidence`) are never rendered. Pure.
+ * untrusted PR run, so its free-text fields (`reason`, `evidence`) are never rendered. Text the AI
+ * review wrote is shown through `prose()`, which disables links, mentions, HTML and formatting. Pure.
  */
 
 /** Hidden marker used to find and update the comment instead of posting a new one each time. */
@@ -21,14 +24,14 @@ const MAX_CHANGED_FILES = 40;
 const MAX_RELATED = 5;
 const MAX_CODE_LENGTH = 120;
 
-export function renderMarkdown(report: Report): string {
+export function renderMarkdown(report: Report, ai?: AiSection): string {
   const lines: string[] = [COMMENT_MARKER, '## 🔍 Impactly PR 점검 결과', ''];
   lines.push('> 이 PR에서 바뀐 내용을 자동으로 살펴본 결과예요. 자동 분석이라 틀릴 수 있으니, 사람이 한 번 더 확인해 주세요.', '');
 
   const diff = report.diff.data;
   if (diff === undefined) {
     lines.push('❌ 바뀐 내용을 가져오지 못해서 이번에는 분석하지 못했어요. 다음 커밋을 올리면 다시 시도해요.', '');
-    lines.push(...statusSection(report), ...footer(report));
+    lines.push(...statusSection(report, ai), ...footer(report));
     return finish(lines);
   }
 
@@ -55,12 +58,14 @@ export function renderMarkdown(report: Report): string {
       `- 리뷰 제안: **${findings.length}건** (꼭 확인 ${byLevel('must').length}건 · 고쳐 보면 좋아요 ${byLevel('consider').length}건 · 참고 ${byLevel('info').length}건)`,
     );
   }
+  if (ai?.status === 'ok') lines.push(`- AI 리뷰 제안: **${ai.data.suggestions.length}건** (아래 🤖 AI 리뷰 참고)`);
   lines.push('');
 
   lines.push(...reviewSection(report, byLevel));
+  if (ai !== undefined) lines.push(...aiSection(ai));
   lines.push(...impactSection(confirmed, possible, unknown, docs, report.impact.data === undefined));
   lines.push(...changedFilesSection(report));
-  lines.push(...statusSection(report), ...footer(report));
+  lines.push(...statusSection(report, ai), ...footer(report));
   return finish(lines);
 }
 
@@ -260,7 +265,7 @@ function changedFilesSection(report: Report): string[] {
   return lines;
 }
 
-function statusSection(report: Report): string[] {
+function statusSection(report: Report, ai?: AiSection): string[] {
   const lines = ['### ℹ️ 이번 점검에서 한 일', ''];
   const rows: readonly [string, Section<unknown>][] = [
     ['바뀐 내용 수집', report.diff],
@@ -270,6 +275,7 @@ function statusSection(report: Report): string[] {
     ['번들 크기 비교', report.bundle],
   ];
   for (const [name, part] of rows) lines.push(`- ${name}: ${STATUS_LABEL[part.status]}`);
+  if (ai !== undefined) lines.push(`- AI 리뷰 (선택 기능): ${aiStatusLabel(ai)}`);
   lines.push('');
   return lines;
 }
@@ -281,6 +287,90 @@ const STATUS_LABEL: Readonly<Record<Status, string>> = {
   skipped: '⏸️ 아직 지원하지 않아요',
   unsupported: '➖ 이 프로젝트 형식은 지원하지 않아요',
 };
+
+const AI_SEVERITY_LABEL: Readonly<Record<AiSeverity, string>> = { must: '🔴', consider: '🟡', info: '🔵' };
+const MAX_AI_CODE_LINES = 15;
+
+function aiSection(ai: AiSection): string[] {
+  if (ai.status !== 'ok') return [];
+  const { data } = ai;
+  const lines = ['### 🤖 AI 리뷰 (참고용)', ''];
+  const notes = ['Claude(AI)가 바뀐 코드를 읽고 만든 제안이에요. AI는 틀릴 수 있으니 참고만 해 주세요.'];
+  notes.push('실제로 이 PR에 추가된 줄을 가리키는 제안만 남겼어요' + (ai.dropped > 0 ? ` (확인되지 않은 ${ai.dropped}건은 뺐어요).` : '.'));
+  if (ai.omittedFiles > 0) notes.push(`분량이 많아서 ${ai.omittedFiles}개 파일은 AI가 읽지 못했어요.`);
+  lines.push(`> ${notes.join(' ')}`, '');
+  if (data.summary !== '') lines.push(`**요약**: ${prose(data.summary)}`, '');
+
+  if (data.suggestions.length === 0) lines.push('AI가 따로 제안한 내용이 없어요.', '');
+  data.suggestions.forEach((item, index) => {
+    lines.push(`${index + 1}. ${AI_SEVERITY_LABEL[item.severity]} ${code(item.file)} ${item.line}번째 줄: ${prose(item.problem)}`, `   👉 ${prose(item.suggestion)}`);
+    if (item.code !== undefined) lines.push(...codeBlock(item.code, '   '));
+  });
+  if (data.suggestions.length > 0) lines.push('');
+
+  if (data.recommendedTests.length > 0) {
+    lines.push('**AI가 추천하는 확인 방법** (추천일 뿐, 실행하지는 않았어요)', '');
+    for (const test of data.recommendedTests) lines.push(`- ${prose(test)}`);
+    lines.push('');
+  }
+  if (data.uncertainties.length > 0) {
+    lines.push('**AI가 확실하지 않다고 한 부분**', '');
+    for (const item of data.uncertainties) lines.push(`- ${prose(item)}`);
+    lines.push('');
+  }
+  return lines;
+}
+
+const AI_SKIP_LABEL: Readonly<Record<AiSkipReason, string>> = {
+  'no-key': '⏸️ 저장소에 Claude API 키가 등록되지 않아서 건너뛰었어요',
+  'author-not-allowed': '⏸️ 처음 기여하는 사람의 PR이라 건너뛰었어요 (API 사용료 보호)',
+  'diff-unavailable': '⏸️ PR의 변경 내용이 너무 커서 가져오지 못했어요',
+  'empty-diff': '⏸️ AI가 읽을 코드 변경이 없어서 건너뛰었어요',
+};
+
+const AI_FAIL_LABEL: Readonly<Record<AiFailReason, string>> = {
+  'invalid-key': '❌ API 키가 올바르지 않거나 권한이 없어요. 저장소 Secrets의 키를 확인해 주세요',
+  'rate-limited': '❌ API 사용 한도에 걸렸어요. 잠시 뒤 새 커밋을 올리면 다시 시도해요',
+  'api-error': '❌ AI 서비스에 연결하지 못했어요. 다음 커밋에서 다시 시도해요',
+  'invalid-output': '❌ AI의 응답 형식이 올바르지 않아서 사용하지 않았어요',
+};
+
+function aiStatusLabel(ai: AiSection): string {
+  if (ai.status === 'ok') return '✅ 완료';
+  return ai.status === 'skipped' ? AI_SKIP_LABEL[ai.reason] : AI_FAIL_LABEL[ai.reason];
+}
+
+/**
+ * Shows AI-written text, which may echo instructions hidden in the PR, as plain text: one line,
+ * Markdown and HTML characters escaped outside inline code, no links, no @mentions or #references.
+ */
+export function prose(text: string, max = 400): string {
+  // eslint-disable-next-line no-control-regex
+  let clean = text.replace(/[\u0000-\u001f\u007f-\u009f\u200b-\u200f\u202a-\u202e\u2066-\u2069]/g, ' ').replace(/\s+/g, ' ').trim();
+  if (clean.length > max) clean = `${clean.slice(0, max - 1)}…`;
+  return clean
+    .split(/(`[^`]{1,120}`)/)
+    .map((part, index) => {
+      if (index % 2 === 1) return part;
+      return part
+        .replace(/[\\`*_{}[\]()<>+!|~=-]/g, (char) => `\\${char}`)
+        // After escaping, so the placeholder's parentheses stay as they are.
+        .replace(/\b(?:(?:https?|ftp|file):\/\/\S*|(?:javascript|data):\S+)/gi, '(링크 생략)')
+        .replace(/\bwww\.\S+/gi, '(링크 생략)')
+        // Full-width look-alikes: GitHub links "@user" and "#123" even when escaped.
+        .replace(/@/g, '＠')
+        .replace(/#/g, '＃');
+    })
+    .join('');
+}
+
+/** A fenced code block that the code cannot break out of. */
+function codeBlock(text: string, indent: string): string[] {
+  const lines = text.replace(/\r\n?/g, '\n').split('\n').slice(0, MAX_AI_CODE_LINES);
+  const longest = Math.max(2, ...(text.match(/`+/g) ?? []).map((run) => run.length));
+  const fence = '`'.repeat(longest + 1);
+  return [`${indent}${fence}`, ...lines.map((line) => `${indent}${line}`), `${indent}${fence}`];
+}
 
 function footer(report: Report): string[] {
   return [
@@ -320,7 +410,7 @@ function list(paths: readonly string[] | undefined): string {
  */
 export function code(text: string): string {
   // eslint-disable-next-line no-control-regex
-  let clean = text.replace(/[\u0000-\u001f\u007f-\u009f‎‏‪-‮⁦-⁩]/g, '');
+  let clean = text.replace(/[\u0000-\u001f\u007f-\u009f\u200e\u200f\u202a-\u202e\u2066-\u2069]/g, '');
   if (clean.length > MAX_CODE_LENGTH) clean = `${clean.slice(0, MAX_CODE_LENGTH - 1)}…`;
   if (clean === '') return '`(빈 값)`';
   const longest = Math.max(0, ...(clean.match(/`+/g) ?? []).map((run) => run.length));

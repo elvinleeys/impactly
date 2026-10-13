@@ -3,12 +3,16 @@ import { readFile, stat } from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
-import { createGitHubRequest, publishReport, type GitHubRequest } from '../github/comment.js';
+import { createGitHubRequest, DEFAULT_AI_AUTHORS, publishReport, type GitHubRequest } from '../github/comment.js';
 
 /**
  * Posts an Impactly report as a PR comment. Meant for a `workflow_run` job that downloaded the
  * report artifact of a `pull_request` run. Reads GITHUB_TOKEN, GITHUB_REPOSITORY and optionally
- * GITHUB_API_URL from the environment. Exit codes: 0 posted or skipped as stale, 1 failed, 2 usage error.
+ * GITHUB_API_URL from the environment.
+ *
+ * Optional AI review: ANTHROPIC_API_KEY (the owner's key), IMPACTLY_AI_MODEL, and
+ * IMPACTLY_AI_AUTHORS (comma-separated PR author associations; default OWNER,MEMBER,COLLABORATOR,CONTRIBUTOR).
+ * Exit codes: 0 posted or skipped as stale, 1 failed, 2 usage error.
  */
 
 const USAGE = `Usage: impactly-comment --report <report.json> --pr-file <pr-number.txt> --head-sha <sha>`;
@@ -20,7 +24,12 @@ export interface CommentCliResult {
   stderr: string;
 }
 
-export async function runCommentCli(argv: readonly string[], env: NodeJS.ProcessEnv, request?: GitHubRequest): Promise<CommentCliResult> {
+export async function runCommentCli(
+  argv: readonly string[],
+  env: NodeJS.ProcessEnv,
+  request?: GitHubRequest,
+  fetchImpl?: typeof fetch,
+): Promise<CommentCliResult> {
   let values;
   try {
     ({ values } = parseArgs({
@@ -48,6 +57,12 @@ export async function runCommentCli(argv: readonly string[], env: NodeJS.Process
       prNumber: Number(prNumber),
       headSha: values['head-sha'],
       report: JSON.parse(reportText) as unknown,
+      ai: {
+        ...(env.ANTHROPIC_API_KEY === undefined ? {} : { apiKey: env.ANTHROPIC_API_KEY }),
+        ...(env.IMPACTLY_AI_MODEL === undefined || env.IMPACTLY_AI_MODEL === '' ? {} : { model: env.IMPACTLY_AI_MODEL }),
+        allowedAuthors: parseAuthors(env.IMPACTLY_AI_AUTHORS),
+        ...(fetchImpl === undefined ? {} : { fetchImpl }),
+      },
     });
     const message =
       result.outcome === 'stale'
@@ -57,6 +72,11 @@ export async function runCommentCli(argv: readonly string[], env: NodeJS.Process
   } catch (error) {
     return { exitCode: 1, stdout: '', stderr: `impactly-comment: ${error instanceof Error ? error.message : String(error)}\n` };
   }
+}
+
+function parseAuthors(value: string | undefined): string[] {
+  if (value === undefined || value.trim() === '') return [...DEFAULT_AI_AUTHORS];
+  return value.split(',').map((item) => item.trim().toUpperCase()).filter((item) => item !== '');
 }
 
 async function readLimited(file: string): Promise<string> {

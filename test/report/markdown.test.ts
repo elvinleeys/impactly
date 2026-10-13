@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 import type { ImpactCandidate, Report, ReviewFinding, ReviewRule } from '../../src/core/types.js';
-import { code, COMMENT_MARKER, describeFinding, renderMarkdown } from '../../src/report/markdown.js';
+import type { AiSection } from '../../src/ai/review.js';
+import { code, COMMENT_MARKER, describeFinding, prose, renderMarkdown } from '../../src/report/markdown.js';
 
 const SHA_A = 'a'.repeat(40);
 const SHA_B = 'b'.repeat(40);
@@ -94,13 +95,13 @@ describe('renderMarkdown', () => {
   });
 
   it('keeps untrusted paths inside code spans, also in tables', () => {
-    const evil = 'a`b|c](https://x.example)<script>@user‮.ts';
+    const evil = 'a`b|c](https://x.example)<script>@user\u202e.ts';
     const report = makeReport();
     const files = report.diff.data?.files ?? [];
     files[0] = { path: evil, change: 'modified', additions: 1, deletions: 0, binary: false, hunks: [] };
     const text = renderMarkdown(report);
     expect(text).toContain('| ``a`b\\|c](https://x.example)<script>@user.ts`` | 수정 |');
-    expect(text).not.toContain('‮');
+    expect(text).not.toContain('\u202e');
   });
 
   it('explains that nothing was analysed when the diff failed', () => {
@@ -163,6 +164,70 @@ describe('describeFinding', () => {
   it('mentions the lock file only when package.json changed', () => {
     expect(describeFinding({ rule: 'config-change', related: ['package.json'] }, makeReport()).fix).toContain('lock 파일');
     expect(describeFinding({ rule: 'config-change', related: ['tsconfig.json'] }, makeReport()).fix).not.toContain('lock 파일');
+  });
+});
+
+describe('AI section', () => {
+  const ai: AiSection = {
+    status: 'ok',
+    dropped: 2,
+    omittedFiles: 1,
+    data: {
+      summary: '버튼이 클릭 시 요청을 보내요.',
+      changedAreas: [],
+      potentialImpacts: [],
+      suggestions: [
+        { severity: 'must', file: 'src/Button.tsx', line: 3, problem: '`fetch` 실패를 처리하지 않아요.', suggestion: 'try/catch로 감싸 주세요.', code: 'try {\n  await fetch(url);\n} catch {}\n```\nbreakout' },
+      ],
+      recommendedTests: ['버튼을 눌러 보세요'],
+      uncertainties: ['서버 응답 형식은 알 수 없어요'],
+    },
+  };
+
+  it('renders the summary, verified suggestions with code, recommendations and uncertainties', () => {
+    const text = renderMarkdown(makeReport(), ai);
+    expect(text).toContain('- AI 리뷰 제안: **1건**');
+    expect(text).toContain('### 🤖 AI 리뷰 (참고용)');
+    expect(text).toContain('(확인되지 않은 2건은 뺐어요)');
+    expect(text).toContain('분량이 많아서 1개 파일은 AI가 읽지 못했어요.');
+    expect(text).toContain('1. 🔴 `src/Button.tsx` 3번째 줄: `fetch` 실패를 처리하지 않아요.');
+    expect(text).toContain('   ````\n   try {');
+    expect(text).toContain('**AI가 추천하는 확인 방법** (추천일 뿐, 실행하지는 않았어요)');
+    expect(text).toContain('- AI 리뷰 (선택 기능): ✅ 완료');
+    expect(text.indexOf('### 💡 리뷰 제안')).toBeLessThan(text.indexOf('### 🤖 AI 리뷰'));
+  });
+
+  it.each<[AiSection, string]>([
+    [{ status: 'skipped', reason: 'no-key' }, 'Claude API 키가 등록되지 않아서 건너뛰었어요'],
+    [{ status: 'skipped', reason: 'author-not-allowed' }, '처음 기여하는 사람의 PR이라 건너뛰었어요'],
+    [{ status: 'failed', reason: 'invalid-key' }, 'API 키가 올바르지 않거나'],
+    [{ status: 'failed', reason: 'rate-limited' }, 'API 사용 한도에 걸렸어요'],
+  ])('shows why the AI review did not run: %j', (section, label) => {
+    const text = renderMarkdown(makeReport(), section);
+    expect(text).toContain(label);
+    expect(text).not.toContain('### 🤖 AI 리뷰');
+  });
+
+  it('omits the AI row entirely when the AI review is not configured at all', () => {
+    expect(renderMarkdown(makeReport())).not.toContain('AI 리뷰');
+  });
+});
+
+describe('prose', () => {
+  it('disables links, mentions, references, HTML and formatting but keeps inline code', () => {
+    const text = prose('Click [here](https://evil.example) or www.evil.example <img src=x onerror=alert(1)> @admin #12 **bold** `a_b`\nnext');
+    expect(text).not.toMatch(/https?:|www\./);
+    expect(text).toContain('(링크 생략)');
+    expect(text).toContain('\\<img');
+    expect(text).toContain('＠admin');
+    expect(text).toContain('＃12');
+    expect(text).toContain('\\*\\*bold\\*\\*');
+    expect(text).toContain('`a_b`');
+    expect(text).not.toContain('\n');
+  });
+
+  it('shortens long text', () => {
+    expect(prose('가'.repeat(1000)).length).toBeLessThanOrEqual(400);
   });
 });
 

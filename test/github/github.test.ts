@@ -74,12 +74,16 @@ describe('validateReport', () => {
 });
 
 /** A fake GitHub API: a PR with a head SHA and a list of comments. */
-function fakeGitHub(options: { prHead?: string; comments?: unknown[] } = {}) {
-  const calls: { method: string; path: string; body?: unknown }[] = [];
-  const request: GitHubRequest = (method, apiPath, body) => {
-    calls.push({ method, path: apiPath, body });
+function fakeGitHub(options: { prHead?: string; comments?: unknown[]; association?: string; diff?: string; diffStatus?: number } = {}) {
+  const calls: { method: string; path: string; body?: unknown; accept?: string }[] = [];
+  const request: GitHubRequest = (method, apiPath, body, accept) => {
+    calls.push({ method, path: apiPath, body, ...(accept === undefined ? {} : { accept }) });
     let response: GitHubResponse = { status: 404, body: { message: 'Not Found' } };
-    if (method === 'GET' && apiPath === '/repos/o/r/pulls/7') response = { status: 200, body: { head: { sha: options.prHead ?? HEAD } } };
+    if (method === 'GET' && apiPath === '/repos/o/r/pulls/7' && accept === 'application/vnd.github.diff') {
+      response = { status: options.diffStatus ?? 200, body: null, text: options.diff ?? '' };
+    } else if (method === 'GET' && apiPath === '/repos/o/r/pulls/7') {
+      response = { status: 200, body: { head: { sha: options.prHead ?? HEAD }, author_association: options.association ?? 'OWNER' } };
+    }
     else if (method === 'GET' && apiPath.startsWith('/repos/o/r/issues/7/comments')) response = { status: 200, body: options.comments ?? [] };
     else if (method === 'POST' && apiPath === '/repos/o/r/issues/7/comments') response = { status: 201, body: { id: 99 } };
     else if (method === 'PATCH' && apiPath.startsWith('/repos/o/r/issues/comments/')) response = { status: 200, body: {} };
@@ -150,10 +154,61 @@ describe('createGitHubRequest', () => {
       return Promise.resolve(new Response('{"id":5}', { status: 201 }));
     }) as typeof fetch;
     const request = createGitHubRequest('tok', 'https://api.example', fakeFetch);
-    expect(await request('POST', '/x', { body: 'hi' })).toEqual({ status: 201, body: { id: 5 } });
+    expect(await request('POST', '/x', { body: 'hi' })).toEqual({ status: 201, body: { id: 5 }, text: '{"id":5}' });
     expect(seen?.url).toBe('https://api.example/x');
     expect((seen?.init?.headers as Record<string, string>).authorization).toBe('Bearer tok');
     expect(seen?.init?.body).toBe('{"body":"hi"}');
+  });
+});
+
+describe('publishReport with the AI review', () => {
+  const diff = [
+    'diff --git a/src/a.ts b/src/a.ts',
+    '--- a/src/a.ts',
+    '+++ b/src/a.ts',
+    '@@ -0,0 +1 @@',
+    '+console.log(secret);',
+  ].join('\n');
+  const anthropic = (input: unknown) =>
+    (() => Promise.resolve(new Response(JSON.stringify({ content: [{ type: 'tool_use', input }] }), { status: 200 }))) as unknown as typeof fetch;
+  const post = (calls: { method: string; body?: unknown }[]) => (calls.find((c) => c.method === 'POST')?.body as { body: string }).body;
+  const base = (request: GitHubRequest) => ({ request, repository: 'o/r', prNumber: 7, headSha: HEAD, report: validReport() });
+
+  it('says the review was skipped when no API key is set', async () => {
+    const github = fakeGitHub();
+    await publishReport({ ...base(github.request), ai: { allowedAuthors: ['OWNER'] } });
+    expect(post(github.calls)).toContain('Claude API 키가 등록되지 않아서 건너뛰었어요');
+    expect(github.calls.some((c) => c.accept !== undefined)).toBe(false);
+  });
+
+  it('does not spend the API key on PRs from authors outside the allowed list', async () => {
+    const github = fakeGitHub({ association: 'FIRST_TIME_CONTRIBUTOR' });
+    const fetchImpl = (() => Promise.reject(new Error('must not be called'))) as unknown as typeof fetch;
+    await publishReport({ ...base(github.request), ai: { apiKey: 'k', allowedAuthors: ['OWNER', 'MEMBER'], fetchImpl } });
+    expect(post(github.calls)).toContain('처음 기여하는 사람의 PR이라 건너뛰었어요');
+  });
+
+  it('reviews the PR diff and adds only verified suggestions to the comment', async () => {
+    const github = fakeGitHub({ diff });
+    const fetchImpl = anthropic({
+      summary: '로그를 추가했어요.',
+      review_suggestions: [
+        { severity: 'must', file: 'src/a.ts', line: 1, quote: 'console.log(secret)', problem: '비밀값이 콘솔에 보여요.', suggestion: '이 줄을 지워 주세요.' },
+        { severity: 'must', file: 'src/a.ts', line: 1, quote: 'eval(', problem: '지어낸 문제', suggestion: '버려져야 해요.' },
+      ],
+    });
+    await publishReport({ ...base(github.request), ai: { apiKey: 'k', allowedAuthors: ['OWNER'], fetchImpl } });
+    const body = post(github.calls);
+    expect(body).toContain('### 🤖 AI 리뷰 (참고용)');
+    expect(body).toContain('1. 🔴 `src/a.ts` 1번째 줄: 비밀값이 콘솔에 보여요.');
+    expect(body).toContain('(확인되지 않은 1건은 뺐어요)');
+    expect(body).not.toContain('지어낸 문제');
+  });
+
+  it('skips the review when the diff cannot be fetched, and still posts the comment', async () => {
+    const github = fakeGitHub({ diffStatus: 406 });
+    expect(await publishReport({ ...base(github.request), ai: { apiKey: 'k', allowedAuthors: ['OWNER'] } })).toMatchObject({ outcome: 'created' });
+    expect(post(github.calls)).toContain('변경 내용이 너무 커서 가져오지 못했어요');
   });
 });
 
