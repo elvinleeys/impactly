@@ -1,0 +1,81 @@
+name: Security gate
+
+# The only check that blocks merging (required status "security-gate" in the main ruleset).
+#
+# pull_request_target runs this workflow, the gate script and .gitleaks.toml from the BASE branch,
+# so a PR cannot edit them to make itself pass. That is safe here because the PR is only read as
+# git data: nothing from the PR is installed, built or executed.
+# Never add steps that check out and run PR code in this workflow.
+on:
+  pull_request_target:
+    types: [opened, synchronize, reopened]
+    branches: [main]
+
+permissions:
+  contents: read
+  statuses: write
+
+concurrency:
+  group: security-gate-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+env:
+  GITLEAKS_VERSION: 8.30.1
+  GITLEAKS_SHA256: 551f6fc83ea457d62a0d98237cbad105af8d557003051f41f3e7ca7b3f2470eb
+
+jobs:
+  gate:
+    name: security-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      BASE_SHA: ${{ github.event.pull_request.base.sha }}
+      HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+      PR_NUMBER: ${{ github.event.pull_request.number }}
+      STATUS_URL: repos/${{ github.repository }}/statuses/${{ github.event.pull_request.head.sha }}
+      RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+      GH_TOKEN: ${{ github.token }}
+    steps:
+      # The result is published as a commit status on the PR head, which the ruleset requires.
+      # Until the final step reports, the PR stays pending and cannot be merged.
+      - name: Mark pending
+        run: >-
+          gh api "$STATUS_URL" -f state=pending -f context=security-gate
+          -f description="Checking for committed secrets and env files" -f target_url="$RUN_URL"
+
+      - name: Checkout base branch (trusted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Fetch PR commits as data
+        run: |
+          git fetch --no-tags --quiet origin "refs/pull/${PR_NUMBER}/head"
+          git cat-file -e "${HEAD_SHA}^{commit}"
+
+      - name: Install gitleaks
+        run: |
+          archive="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -fsSL -o "$RUNNER_TEMP/$archive" \
+            "https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}/${archive}"
+          echo "${GITLEAKS_SHA256}  $RUNNER_TEMP/$archive" | sha256sum --check --strict
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          tar -xzf "$RUNNER_TEMP/$archive" -C "$RUNNER_TEMP/gitleaks" gitleaks
+          echo "GITLEAKS=$RUNNER_TEMP/gitleaks/gitleaks" >> "$GITHUB_ENV"
+
+      - name: Run security checks
+        run: bash .github/scripts/security-gate.sh "$BASE_SHA" "$HEAD_SHA"
+
+      - name: Report result
+        if: always()
+        env:
+          RESULT: ${{ job.status }}
+        run: |
+          if [ "$RESULT" = success ]; then
+            state=success; description="No committed secrets or env files"
+          else
+            state=failure; description="Security problem found or check failed - see details"
+          fi
+          gh api "$STATUS_URL" -f state="$state" -f context=security-gate \
+            -f description="$description" -f target_url="$RUN_URL"

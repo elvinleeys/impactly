@@ -1,0 +1,70 @@
+name: CI
+
+# Runs automatically on every PR to main and every push to main.
+# `pull_request` (not `pull_request_target`) gives fork PRs a read-only token and no secrets,
+# so running the PR's own code here is safe.
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+# A new push to the same PR cancels the run that is still in progress, so only the latest commit is verified.
+concurrency:
+  group: ci-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  verify:
+    name: Typecheck, lint, test, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the impact report below can find the merge-base.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          # Reuses downloaded packages between runs, keyed on package-lock.json.
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Lint
+        run: npm run lint
+
+      - name: Test
+        run: npm test
+
+      - name: Build
+        run: npm run build
+
+      # Dogfooding: run the impact analysis on this PR and show it on the run's Summary page.
+      # It needs no write permission, so it also works for PRs from forks. It never blocks the PR.
+      - name: Impact report
+        if: github.event_name == 'pull_request'
+        continue-on-error: true
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          {
+            echo '## Impactly report'
+            echo
+            echo '~~~text'
+            node dist/entry/cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --text || echo "(impact analysis exited with code $?)"
+            echo '~~~'
+          } >> "$GITHUB_STEP_SUMMARY"

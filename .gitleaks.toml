@@ -1,0 +1,6 @@
+# Secret scanning rules for the security gate (.github/workflows/security.yml).
+# The gate always reads this file from the base branch, so changes here take effect only after merge.
+title = "impactly gitleaks config"
+
+[extend]
+useDefault = true
