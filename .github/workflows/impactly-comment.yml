@@ -1,0 +1,68 @@
+name: Impactly comment
+
+# Posts the Impactly report of a PR as a comment on that PR (and updates it on new pushes).
+#
+# Why a separate workflow: a PR from a fork runs `pull_request` workflows with a read-only token,
+# so the CI run cannot comment. `workflow_run` runs afterwards in this repository's context with a
+# token that can. In exchange it must never run PR code:
+# - Impactly is built from this repository's default branch (the default checkout for workflow_run).
+# - The report artifact from the PR run is data only. `dist/entry/comment.js` validates it, drops
+#   its free text and writes the comment itself, and only accepts the PR number from the artifact
+#   if that PR's head is the commit the CI run analysed (`workflow_run.head_sha`).
+# Like all `workflow_run` workflows, this file takes effect from the default branch only.
+on:
+  workflow_run:
+    workflows: [CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  comment:
+    name: Post Impactly comment
+    if: github.event.workflow_run.event == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      actions: read # download the report artifact of the CI run
+      contents: read # check out the default branch
+      pull-requests: write # create or update the comment
+    steps:
+      - name: Checkout default branch (trusted)
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Download report
+        id: download
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.event.workflow_run.id }}
+        run: |
+          dir="$RUNNER_TEMP/impactly-report"
+          mkdir -p "$dir"
+          if gh run download "$RUN_ID" --repo "$GITHUB_REPOSITORY" --name impactly-report --dir "$dir"; then
+            echo "dir=$dir" >> "$GITHUB_OUTPUT"
+          else
+            echo "The CI run has no impactly-report artifact (it may have been cancelled); nothing to post."
+          fi
+
+      - name: Post comment
+        if: steps.download.outputs.dir != ''
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          HEAD_SHA: ${{ github.event.workflow_run.head_sha }}
+          REPORT_DIR: ${{ steps.download.outputs.dir }}
+        run: node dist/entry/comment.js --report "$REPORT_DIR/report.json" --pr-file "$REPORT_DIR/pr-number.txt" --head-sha "$HEAD_SHA"

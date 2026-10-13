@@ -3,6 +3,7 @@ import { realpathSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { parseArgs } from 'node:util';
 import type { Limits, Report } from '../core/types.js';
+import { renderMarkdown } from '../report/markdown.js';
 import { buildReport } from './run.js';
 
 const USAGE = `Usage: impactly --base <sha> --head <sha> [options]
@@ -13,6 +14,7 @@ Options:
   --max-depth <n>      Reverse dependency search depth
   --max-files <n>      Maximum changed files to report
   --text               Print a short text summary instead of JSON
+  --markdown           Print the PR comment (Korean Markdown) instead of JSON
   -h, --help           Show this help`;
 
 export interface CliResult {
@@ -35,6 +37,7 @@ export async function runCli(argv: readonly string[]): Promise<CliResult> {
         'max-depth': { type: 'string' },
         'max-files': { type: 'string' },
         text: { type: 'boolean', default: false },
+        markdown: { type: 'boolean', default: false },
         help: { type: 'boolean', short: 'h', default: false },
       },
       strict: true,
@@ -44,6 +47,7 @@ export async function runCli(argv: readonly string[]): Promise<CliResult> {
   }
   if (values.help) return { exitCode: 0, stdout: `${USAGE}\n`, stderr: '' };
   if (values.base === undefined || values.head === undefined) return usageError('--base and --head are required');
+  if (values.text && values.markdown) return usageError('--text and --markdown cannot be combined');
   if (values.mode !== undefined && values.mode !== 'merge-base' && values.mode !== 'direct') {
     return usageError('--mode must be "merge-base" or "direct"');
   }
@@ -64,8 +68,8 @@ export async function runCli(argv: readonly string[]): Promise<CliResult> {
       limits,
       ...(values.mode === undefined ? {} : { mode: values.mode }),
     });
-    const failedSection = report.diff.status === 'failed' || report.impact.status === 'failed';
-    const stdout = values.text ? formatText(report) : `${JSON.stringify(report, null, 2)}\n`;
+    const failedSection = report.diff.status === 'failed' || report.impact.status === 'failed' || report.review.status === 'failed';
+    const stdout = values.markdown ? renderMarkdown(report) : values.text ? formatText(report) : `${JSON.stringify(report, null, 2)}\n`;
     return { exitCode: failedSection ? 1 : 0, stdout, stderr: '' };
   } catch (error) {
     return { exitCode: 2, stdout: '', stderr: `impactly: ${error instanceof Error ? error.message : String(error)}\n` };
@@ -76,7 +80,7 @@ function usageError(message: string): CliResult {
   return { exitCode: 2, stdout: '', stderr: `impactly: ${message}\n\n${USAGE}\n` };
 }
 
-/** Plain-text summary for local use. The Markdown report is a later stage. */
+/** Plain-text summary for local debugging. The user-facing output is the Markdown comment (--markdown). */
 export function formatText(report: Report): string {
   const lines = [`diff: ${report.diff.status}${report.diff.reason ? ` (${report.diff.reason})` : ''}`];
   for (const file of report.diff.data?.files ?? []) {
@@ -87,7 +91,14 @@ export function formatText(report: Report): string {
   for (const candidate of report.impact.data?.candidates ?? []) {
     lines.push(`  [${candidate.certainty}] ${candidate.path} — ${candidate.reason}, via ${candidate.via.join(' -> ')}`);
   }
-  for (const item of [...report.diff.evidence, ...report.impact.evidence]) lines.push(`  · ${item.source}: ${item.detail}`);
+  lines.push(`review: ${report.review.status}${report.review.reason ? ` (${report.review.reason})` : ''}`);
+  for (const finding of report.review.data?.findings ?? []) {
+    const where = `${finding.file ?? ''}${finding.line === undefined ? '' : `:${finding.line}`}`;
+    lines.push(`  [${finding.rule}] ${where}${finding.related ? ` (${finding.related.join(', ')})` : ''}`);
+  }
+  for (const item of [...report.diff.evidence, ...report.impact.evidence, ...report.review.evidence]) {
+    lines.push(`  · ${item.source}: ${item.detail}`);
+  }
   lines.push(`tests: ${report.tests.status} (${report.tests.reason ?? ''})`, `bundle: ${report.bundle.status} (${report.bundle.reason ?? ''})`);
   return `${lines.join('\n')}\n`;
 }

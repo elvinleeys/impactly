@@ -86,8 +86,16 @@ export interface ImpactCandidate {
   via: string[];
 }
 
+/** An import in a changed file that matches no file in the head commit. */
+export interface UnresolvedImport {
+  file: string;
+  specifier: string;
+}
+
 export interface ImpactData {
   candidates: ImpactCandidate[];
+  /** Unresolved imports in changed files (other files are not reported). */
+  unresolved: UnresolvedImport[];
   stats: {
     analyzedFiles: number;
     skippedFiles: number;
@@ -111,12 +119,58 @@ export interface Limits {
   maxTotalBytes: number;
 }
 
+/**
+ * Rule-based review findings. They carry only structured facts (rule, paths, line numbers);
+ * the human-readable text is produced by the report renderer, so a report coming from an
+ * untrusted PR run cannot inject its own wording into a comment.
+ */
+export type ReviewRule =
+  /** An importer still points at a deleted or renamed file. */
+  | 'deleted-still-imported'
+  /** A changed file imports something that matches no file. */
+  | 'unresolved-import'
+  /** An added `debugger` statement. */
+  | 'debugger'
+  /** Added console.log/debug/trace/dir calls outside tests. */
+  | 'console-log'
+  /** Added `any` types in TypeScript. */
+  | 'any-type'
+  /** Added TODO/FIXME/XXX/HACK comments. */
+  | 'todo'
+  /** Many files or lines changed in one PR. */
+  | 'large-pr'
+  /** Project-wide configuration changed. */
+  | 'config-change'
+  /** Test files that use the changed code (recommended to run; not executed). */
+  | 'tests-to-run'
+  /** Source code changed, but no related test file was changed or found. */
+  | 'no-tests';
+
+export interface ReviewFinding {
+  rule: ReviewRule;
+  /** File the finding is about, if any. */
+  file?: string;
+  /** First relevant line in the head version of `file`. */
+  line?: number;
+  /** How many times the pattern occurs in `file` (line rules), or the size measured (large-pr). */
+  count?: number;
+  /** Other files involved, e.g. the deleted file that is still imported. */
+  related?: string[];
+  /** Unresolved import specifier (unresolved-import only). */
+  specifier?: string;
+}
+
+export interface ReviewData {
+  findings: ReviewFinding[];
+}
+
 export interface Report {
   version: 1;
   base: string;
   head: string;
   diff: Section<DiffData>;
   impact: Section<ImpactData>;
+  review: Section<ReviewData>;
   tests: Section<never>;
   bundle: Section<never>;
 }
