@@ -10,7 +10,7 @@ Impactly is a (planned) free GitHub Marketplace JavaScript Action that analyses 
 
 Work proceeds in gated stages:
 - **Done:** git diff collection (`src/git`), name-level impact analysis (`src/impact`), rule-based review (`src/review`), the Korean Markdown comment (`src/report`), and posting it on this repo's PRs (`src/github`, `.github/workflows/impactly-comment.yml`).
-- **Next:** packaging as a reusable Marketplace Action. The first release ships with **rule-based review only**, so it is free and needs no API key.
+- **Done:** packaging as a reusable Action (`action.yml`, `src/action`, `action-dist/`), named "Impactly PR Review" (the name "Impactly" belongs to an existing GitHub org). Marketplace listing is a manual release step by the owner. The first release ships with **rule-based review only**, so it is free and needs no API key.
 - **Not yet built:** test discovery/execution, bundle comparison, Lighthouse (later).
 - **Later, not now:** an optional AI review that runs only with the user's own API key. A prototype (Claude + OpenAI, closed PR #6) was dropped on the owner's request. Don't start it again unless asked. `Report.tests` and `Report.bundle` are always `skipped` for now.
 
@@ -23,6 +23,7 @@ npx vitest run -t "rename"                # tests whose name matches
 npm run typecheck                         # tsc --noEmit over src + test
 npm run lint                              # eslint, strictTypeChecked rules
 npm run build                             # tsc -> dist/
+npm run bundle                            # esbuild -> action-dist/index.cjs (commit it; CI fails if stale)
 node dist/entry/cli.js --base <sha> --head <sha> [--cwd <repo>] [--markdown | --text] [--mode merge-base|direct] [--max-depth N] [--max-files N]
 node dist/entry/comment.js --report report.json --pr-file pr-number.txt --head-sha <sha>   # needs GITHUB_TOKEN, GITHUB_REPOSITORY
 ```
@@ -44,6 +45,14 @@ Pipeline (`src/entry/run.ts` → `buildReport`):
 3. **`src/review/review.ts` `runReview`**: reads the lines the PR added, by slicing the head blobs with the diff hunks. `rules.ts` `reviewFindings` is pure and turns facts into `ReviewFinding`s. A finding holds only structured data: rule id, file, line, count, related paths, specifier.
 4. **`src/report/markdown.ts` `renderMarkdown`**: Report → Korean comment. It writes every sentence itself (`describeFinding`) and renders repository-derived strings only through `code()`, an escaped inline code span. It never renders `reason` or `evidence` free text. Lists are capped and the output stays under GitHub's 65,536-character limit.
 5. **`src/github/`**: the only code that calls the GitHub API. `validate.ts` `validateReport` rebuilds an untrusted report.json field by field. `comment.ts` `publishReport` checks that the PR's current head equals the analysed head (otherwise it returns `stale`), then creates or updates the comment. The comment is found by `COMMENT_MARKER` **and** the `github-actions[bot]` author.
+
+**GitHub Action** (`action.yml`, `runs.using: node24`, `main: action-dist/index.cjs`):
+- `src/action/main.ts` `runAction` has two modes:
+  - `analyze` (`pull_request` only): runs `buildReport`, then writes `report.json` and `pr-number.txt` to `report-dir`, plus the Markdown to the job summary.
+  - `comment` (`workflow_run` triggered by a PR, or `pull_request`): calls `publishReport` with the head SHA taken from the event.
+- `src/action/context.ts` replaces `@actions/core`: `INPUT_*` env vars, `GITHUB_OUTPUT`/`GITHUB_STEP_SUMMARY` files, escaped workflow commands. Analysis problems never fail the step; misconfiguration and API errors do.
+- `action-dist/` is a generated, committed esbuild CJS bundle (~10 MB, including TypeScript). Never edit it by hand. Run `npm run bundle` after changing `src/`. `ci.yml` checks it is up to date.
+- Releases: tag `vX.Y.Z` and move the major tag `vX`. Breaking input/behaviour changes need a new major.
 
 Each stage returns a `Section<T>` with `{ status, data?, reason?, evidence[] }` (`src/core/types.ts`). Errors are caught per section, so a failing section does not abort the others.
 
@@ -73,8 +82,8 @@ Path aliases: `config.ts` reads the root `tsconfig.json`/`jsconfig.json` (follow
 
 - `ci.yml` (`pull_request`) has two jobs:
   - `verify` runs typecheck, lint, test and build. It is informational only, by the owner's choice; tests are not a merge requirement.
-  - `report` runs the CLI on the PR and uploads `impactly-report` (`report.json` + `pr-number.txt`). It also writes the Markdown to the job summary.
-- `impactly-comment.yml` (`workflow_run` after CI) builds from the default branch, downloads the artifact and runs `dist/entry/comment.js`. Like every `workflow_run` workflow, a change to it only takes effect after merge to main.
+  - `report` runs the Action from the checkout (`uses: ./`, `mode: analyze`) and uploads `impactly-report`.
+- `impactly-comment.yml` (`workflow_run` after CI) checks out the default branch, downloads the artifact to `runner.temp`, and runs `uses: ./` with `mode: comment`. Nothing is installed in this write-token job. Like every `workflow_run` workflow, a change to it only takes effect after merge to main.
 - `security.yml` (`pull_request_target`) is the **only merge-blocking check**. It publishes the commit status `security-gate` on the PR head, and the `main` ruleset requires that status. It runs `.github/scripts/security-gate.sh` and gitleaks (pinned version and SHA-256) with `.gitleaks.toml`, all taken from the **base branch**, so edits in a PR only apply after merge. The script must keep treating the PR as git data only (no checkout-and-run, no `npm install`). It also fails closed: tool errors exit 2 and leaks it cannot parse still fail.
 - Test the gate script locally with throwaway repos. It needs `gitleaks` and `jq`. With Git Bash on Windows, put `/c/...` style paths in `PATH`, because `C:` breaks the `:` separator.
 - ESM with `NodeNext`: relative imports in `src`/`test` need the `.js` extension. `tsconfig` enables `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`. Omit optional properties instead of assigning `undefined`.
