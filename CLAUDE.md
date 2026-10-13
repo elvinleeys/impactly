@@ -10,8 +10,9 @@ Impactly is a (planned) free GitHub Marketplace JavaScript Action that analyses 
 
 Work proceeds in gated stages:
 - **Done:** git diff collection (`src/git`), name-level impact analysis (`src/impact`), rule-based review (`src/review`), the Korean Markdown comment (`src/report`), and posting it on this repo's PRs (`src/github`, `.github/workflows/impactly-comment.yml`).
-- **Next:** optional AI review suggestions, used only when the user supplies their own Claude API key.
-- **Not yet built:** packaging as a reusable Marketplace Action, test discovery/execution, bundle comparison, Lighthouse (later). `Report.tests` and `Report.bundle` are always `skipped` for now.
+- **Next:** packaging as a reusable Marketplace Action. The first release ships with **rule-based review only**, so it is free and needs no API key.
+- **Not yet built:** test discovery/execution, bundle comparison, Lighthouse (later).
+- **Later, not now:** an optional AI review that runs only with the user's own API key. A prototype (Claude + OpenAI, closed PR #6) was dropped on the owner's request. Don't start it again unless asked. `Report.tests` and `Report.bundle` are always `skipped` for now.
 
 ## Commands
 
