@@ -53,6 +53,12 @@ Path aliases: `config.ts` reads the root `tsconfig.json`/`jsconfig.json` (follow
 - Never mark something that was not executed or measured as `ok`. Use `skipped`, `unsupported` or `failed` with a `reason`.
 - Analysis logic stays free of GitHub API calls. API access belongs in a separate module (planned `src/github/`) that consumes the `Report` JSON. The core analysis must run locally without network access.
 - Fork-PR design for the future Action: analysis runs under `pull_request` (read-only token, no secrets); commenting runs under `workflow_run` and only reads the uploaded artifact. Never build or run fork code under `pull_request_target`.
+
+## This repo's own PR checks
+
+- `ci.yml` (`pull_request`): typecheck, lint, test, build, plus an Impactly report in the job summary. It is informational only, by the owner's choice; tests are not a merge requirement.
+- `security.yml` (`pull_request_target`) is the **only merge-blocking check**. It publishes the commit status `security-gate` on the PR head, and the `main` ruleset requires that status. It runs `.github/scripts/security-gate.sh` and gitleaks (pinned version and SHA-256) with `.gitleaks.toml`, all taken from the **base branch**, so edits in a PR only apply after merge. The script must keep treating the PR as git data only (no checkout-and-run, no `npm install`). It also fails closed: tool errors exit 2 and leaks it cannot parse still fail.
+- Test the gate script locally with throwaway repos. It needs `gitleaks` and `jq`. With Git Bash on Windows, put `/c/...` style paths in `PATH`, because `C:` breaks the `:` separator.
 - ESM with `NodeNext`: relative imports in `src`/`test` need the `.js` extension. `tsconfig` enables `exactOptionalPropertyTypes` and `noUncheckedIndexedAccess`. Omit optional properties instead of assigning `undefined`.
 
 ## Known limitations

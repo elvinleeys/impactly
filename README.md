@@ -207,3 +207,18 @@ npm run build                             # dist/ 로 빌드
 ```
 
 > `typescript`는 `6.0.3`으로 고정되어 있습니다. TypeScript 7에는 이 도구가 사용하는 컴파일러 API가 없으므로 임의로 올리지 마세요.
+
+### 이 저장소의 PR 검사
+
+| 검사 | 실행 시점 | merge 차단 |
+|---|---|---|
+| **CI** (`.github/workflows/ci.yml`) — 타입 검사, lint, 테스트, 빌드, 영향 분석 결과(Summary) | PR·`main` push마다 자동 | ❌ 결과만 표시 |
+| **보안 검사** (`.github/workflows/security.yml`, 상태 이름 `security-gate`) | PR마다 자동 | ✅ 실패하면 merge 불가 |
+
+보안 검사가 막는 경우:
+- `.env`, `.env.*` 파일이 커밋됨 (`.env.example`, `.env.sample`, `.env.template`, `.env.dist`는 허용)
+- `.gitignore`가 `.env`, `.env.local`을 제외하지 않음
+- API 키·토큰·개인 키 등 비밀값이 PR의 **어느 커밋에든** 들어 있음 ([gitleaks](https://github.com/gitleaks/gitleaks) 기본 규칙. 나중 커밋에서 지웠어도 기록에 남으므로 차단)
+- 키스토어 파일(`id_rsa`, `*.p12`, `*.pfx`, `*.jks`, `*.keystore`)이 커밋됨
+
+보안 검사는 **`main` 브랜치에 있는** 워크플로·스크립트·`.gitleaks.toml`로 실행되므로, PR에서 이 파일들을 고쳐도 그 PR의 검사에는 적용되지 않습니다(merge 후부터 적용). 오탐이라면 `main`의 `.gitleaks.toml`에 허용 규칙을 추가하세요. 코드 주석 `gitleaks:allow`로는 우회할 수 없습니다.
