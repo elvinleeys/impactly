@@ -52,19 +52,52 @@ jobs:
       - name: Build
         run: npm run build
 
-      # Dogfooding: run the impact analysis on this PR and show it on the run's Summary page.
-      # It needs no write permission, so it also works for PRs from forks. It never blocks the PR.
-      - name: Impact report
-        if: github.event_name == 'pull_request'
-        continue-on-error: true
+  # Dogfooding: analyse this PR with Impactly and hand the result to impactly-comment.yml, which posts
+  # it as a PR comment. This job only reads (no secrets, read-only token), so it is safe for fork PRs;
+  # the report it uploads is treated as untrusted by the comment workflow. It never blocks the PR,
+  # and it runs separately from `verify` so a failing test does not stop the comment.
+  report:
+    name: Impactly report
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Full history so the analysis can find the merge-base.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 24
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --no-audit --no-fund
+
+      - name: Build
+        run: npm run build
+
+      - name: Analyse this PR
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
         run: |
-          {
-            echo '## Impactly report'
-            echo
-            echo '~~~text'
-            node dist/entry/cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --text || echo "(impact analysis exited with code $?)"
-            echo '~~~'
-          } >> "$GITHUB_STEP_SUMMARY"
+          mkdir -p impactly-report
+          # Exit code 1 means a section failed; the JSON report is still written and explains it.
+          node dist/entry/cli.js --base "$BASE_SHA" --head "$HEAD_SHA" > impactly-report/report.json || [ "$?" -eq 1 ]
+          echo "$PR_NUMBER" > impactly-report/pr-number.txt
+          # The same comment, also on the run's Summary page.
+          node dist/entry/cli.js --base "$BASE_SHA" --head "$HEAD_SHA" --markdown >> "$GITHUB_STEP_SUMMARY" || true
+
+      - name: Upload report for the comment workflow
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: impactly-report
+          path: impactly-report/
+          retention-days: 7
+          if-no-files-found: error

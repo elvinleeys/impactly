@@ -1,7 +1,7 @@
 import path from 'node:path';
 import { compareStrings, normalizeRepoPath } from '../core/paths.js';
 import { failed, section } from '../core/result.js';
-import type { DiffData, Evidence, ImpactCandidate, ImpactData, Limits, Section, Status } from '../core/types.js';
+import type { DiffData, Evidence, ImpactCandidate, ImpactData, Limits, Section, Status, UnresolvedImport } from '../core/types.js';
 import { readBlobs } from '../git/runner.js';
 import { listTree, type TreeEntry } from '../git/tree.js';
 import { seedsFromDiff } from './classify.js';
@@ -96,6 +96,7 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
     const unknown: ImpactCandidate[] = [];
     const changedOrRemoved = [...changed, ...removedPaths];
     let unresolvedSpecifiers = 0;
+    const unresolved: UnresolvedImport[] = [];
     let opaqueDynamicImports = 0;
     let analyzedFiles = 0;
 
@@ -119,6 +120,7 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
           unresolvedSpecifiers++;
           // Only changed files are reported: an unresolved import there may be a break the PR introduced.
           if (changed.has(entry.path)) {
+            unresolved.push({ file: entry.path, specifier });
             evidence.push({ source: 'import-graph', detail: `${entry.path}: ${resolution.reason}` });
           }
         }
@@ -173,6 +175,7 @@ export async function analyzeImpact(input: ImpactInput): Promise<Section<ImpactD
 
     const data: ImpactData = {
       candidates: sortCandidates([...candidates.values()]),
+      unresolved,
       stats: {
         analyzedFiles,
         skippedFiles: totalCodeFiles - analyzedFiles,

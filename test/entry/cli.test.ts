@@ -22,15 +22,17 @@ describe('buildReport', () => {
     expect(report).toMatchObject({ version: 1, base, head });
     expect(report.diff.status).toBe('ok');
     expect(report.impact.data?.candidates.map((c) => c.path)).toEqual(['src/a.ts', 'src/b.ts']);
+    expect(report.review).toMatchObject({ status: 'ok', data: { findings: [{ rule: 'no-tests' }] } });
     expect(report.tests).toMatchObject({ status: 'skipped' });
     expect(report.bundle).toMatchObject({ status: 'skipped' });
   });
 
-  it('fails the impact section when the diff fails, keeping the original inputs', async () => {
+  it('fails the impact and review sections when the diff fails, keeping the original inputs', async () => {
     const { head } = twoCommits();
     const report = await buildReport({ baseSha: 'f'.repeat(40), headSha: head, cwd: repo?.dir ?? '' });
     expect(report.diff.status).toBe('failed');
     expect(report.impact).toMatchObject({ status: 'failed', reason: 'Impact analysis needs the diff, which failed' });
+    expect(report.review).toMatchObject({ status: 'failed' });
     expect(report.base).toBe('f'.repeat(40));
   });
 
@@ -55,6 +57,15 @@ describe('runCli', () => {
     const result = await runCli(['--base', base, '--head', head, '--cwd', repo?.dir ?? '', '--text', '--max-depth', '1']);
     expect(result.stdout).toContain('[confirmed] src/b.ts — imports-changed, via src/b.ts -> src/a.ts');
     expect(result.stdout).toContain('tests: skipped');
+  });
+
+  it('prints the Korean PR comment with --markdown', async () => {
+    const { base, head } = twoCommits();
+    const result = await runCli(['--base', base, '--head', head, '--cwd', repo?.dir ?? '', '--markdown']);
+    expect(result.exitCode).toBe(0);
+    expect(result.stdout).toContain('## 🔍 Impactly PR 점검 결과');
+    expect(result.stdout).toContain('`src/b.ts`: 바뀐 `src/a.ts` 파일의 코드를 사용해요');
+    expect((await runCli(['--base', base, '--head', head, '--text', '--markdown'])).exitCode).toBe(2);
   });
 
   it('exits 1 when a section failed', async () => {
@@ -109,6 +120,7 @@ describe('formatText', () => {
         },
       },
       impact: { status: 'failed', reason: 'boom', evidence: [] },
+      review: { status: 'ok', evidence: [], data: { findings: [{ rule: 'console-log', file: 'n.ts', line: 3, count: 1 }] } },
       tests: { status: 'skipped', reason: 'later', evidence: [] },
       bundle: { status: 'skipped', reason: 'later', evidence: [] },
     };
@@ -116,5 +128,6 @@ describe('formatText', () => {
     expect(text).toContain('(binary)');
     expect(text).toContain('o.ts -> n.ts');
     expect(text).toContain('impact: failed (boom)');
+    expect(text).toContain('[console-log] n.ts:3');
   });
 });
