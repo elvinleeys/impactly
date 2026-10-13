@@ -1,0 +1,31 @@
+{
+  "name": "impactly",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Analyze which files a pull request affects, recommend related tests and compare bundle size.",
+  "license": "MIT",
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "bin": {
+    "impactly": "dist/entry/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "lint": "eslint .",
+    "test": "vitest run",
+    "test:watch": "vitest"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^24.19.2",
+    "eslint": "^10.12.0",
+    "typescript-eslint": "^8.71.2",
+    "vitest": "^5.0.4"
+  },
+  "dependencies": {
+    "typescript": "6.0.3"
+  }
+}
